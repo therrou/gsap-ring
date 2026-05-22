@@ -17,6 +17,8 @@ type DebugControls = {
   spinSpeed: number;
   radius: number;
   depth: number;
+  centerOffsetZ: number;
+  cardTwist: number;
 };
 
 const DEFAULT_CONTROLS: DebugControls = {
@@ -26,19 +28,21 @@ const DEFAULT_CONTROLS: DebugControls = {
   spinSpeed: 0.25,
   radius: 350,
   depth: 115,
+  centerOffsetZ: 0,
+  cardTwist: 0,
 };
 
 const FRAME_SOURCES = [
-  "/.tmp_frames/frame-01.png",
-  "/.tmp_frames/frame-02.png",
-  "/.tmp_frames/frame-03.png",
-  "/.tmp_frames/frame-04.png",
-  "/.tmp_frames/frame-05.png",
-  "/.tmp_frames/frame-06.png",
-  "/.tmp_frames/frame-07.png",
-  "/.tmp_frames/frame-08.png",
-  "/.tmp_frames/frame-09.png",
-  "/.tmp_frames/frame-10.png",
+  "https://picsum.photos/seed/ring-01/320/420",
+  "https://picsum.photos/seed/ring-02/320/420",
+  "https://picsum.photos/seed/ring-03/320/420",
+  "https://picsum.photos/seed/ring-04/320/420",
+  "https://picsum.photos/seed/ring-05/320/420",
+  "https://picsum.photos/seed/ring-06/320/420",
+  "https://picsum.photos/seed/ring-07/320/420",
+  "https://picsum.photos/seed/ring-08/320/420",
+  "https://picsum.photos/seed/ring-09/320/420",
+  "https://picsum.photos/seed/ring-10/320/420",
 ];
 
 const IMAGE_SOURCES = Array.from({ length: 24 }, (_, index) => FRAME_SOURCES[index % FRAME_SOURCES.length]);
@@ -82,8 +86,8 @@ export default function Home() {
           yPercent: -50,
           x: transform.x,
           y: transform.y,
-          z: transform.z,
-          rotationZ: transform.faceRotationZ,
+          z: transform.z + controls.centerOffsetZ,
+          rotationZ: transform.faceRotationZ + controls.cardTwist,
           autoAlpha: 1,
         });
       });
@@ -175,6 +179,26 @@ export default function Home() {
           value={controls.depth}
           onChange={(value) => {
             setControls((previous) => ({ ...previous, depth: value }));
+          }}
+        />
+        <RangeControl
+          label="Center Offset Z"
+          min={-300}
+          max={300}
+          step={1}
+          value={controls.centerOffsetZ}
+          onChange={(value) => {
+            setControls((previous) => ({ ...previous, centerOffsetZ: value }));
+          }}
+        />
+        <RangeControl
+          label="Card Twist"
+          min={-180}
+          max={180}
+          step={1}
+          value={controls.cardTwist}
+          onChange={(value) => {
+            setControls((previous) => ({ ...previous, cardTwist: value }));
           }}
         />
         <button
