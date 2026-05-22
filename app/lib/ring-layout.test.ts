@@ -18,4 +18,9 @@ describe("ring layout", () => {
     const transforms = buildRingTransforms({ count: 4, radius: 300, depthWarp: 80 });
     expect(transforms[1].z).toBeCloseTo(-380, 6);
   });
+
+  it("returns one transform per requested card", () => {
+    const transforms = buildRingTransforms({ count: 24, radius: 350, depthWarp: 115 });
+    expect(transforms).toHaveLength(24);
+  });
 });
