@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildRingTransforms, ringAngleAtIndex } from "./ring-layout";
+import {
+  buildRingTransforms,
+  ringAngleAtIndex,
+  stackedRingAngleAtIndex,
+  stackedRingTiltAtIndex,
+} from "./ring-layout";
 
 describe("ring layout", () => {
   it("uses example-2 angle offset formula", () => {
@@ -22,5 +27,15 @@ describe("ring layout", () => {
   it("returns one transform per requested card", () => {
     const transforms = buildRingTransforms({ count: 24, radius: 350, depthWarp: 115 });
     expect(transforms).toHaveLength(24);
+  });
+
+  it("bends nearby cards into stacked state angles", () => {
+    const stackedAngle = stackedRingAngleAtIndex(16, 24, 15, 1);
+    const expected = ringAngleAtIndex(16, 24) + Math.PI * 0.5;
+    expect(stackedAngle).toBeCloseTo(expected, 8);
+  });
+
+  it("returns zero stacked tilt for distant cards", () => {
+    expect(stackedRingTiltAtIndex(23, 24, 15)).toBe(0);
   });
 });
