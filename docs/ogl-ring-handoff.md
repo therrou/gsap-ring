@@ -1,6 +1,8 @@
 # OGL Image Ring — Handoff Notes
 
-Replication of the scroll-driven image-ring flow from `example-2.js` (a 4,250-line bundled OGL/GSAP/ScrollTrigger experience). The current implementation lives on `/test` and covers **ring → zoom → stack → stacked-hover**.
+Replication of the scroll-driven image-ring flow from `example-2.js` (a 4,250-line bundled OGL/GSAP/ScrollTrigger experience). The current implementation lives on `/test` and covers **ring (+ idle hover) → zoom → stack → iso → stacked-hover**.
+
+The ring-idle hover is a faithful port of example-2's `Ar` (bundle line ~3507): a damped-pointer "plane influence" that turns + pushes nearby cards toward the camera in their own local frame. See §1 "Ring hover" below.
 
 ---
 
@@ -43,9 +45,15 @@ Replication of the scroll-driven image-ring flow from `example-2.js` (a 4,250-li
     └── ringRoot       — mouse tilt + zoom scale + zoom translation
         └── wrapperRoot — Z rotation that brings featured to bottom of un-tilted ring
             └── containerRoot — extra X tilt added during stack phase
-                └── 24 card meshes
+                └── per card:
+                    └── card.root  — ring placement: position + stack/iso targets + tangent roll
+                        └── card.mesh — hover "plane" offsets only (local +Z push, local Y face turn)
     ```
-  - **Cards**: each is a `Plane(90, 120)` mesh with its own `Program` (so each card has independent uniforms + texture). Plane normal +Z means cards face the camera by default.
+    The per-card `root → mesh` split mirrors example-2's outer card transform
+    (`position=k`, `rotation=W`) wrapping an inner plane (`positionPlane`,
+    `rotationPlane`). Keeping hover on the inner mesh makes the forward push
+    happen along the card's own normal, not global Z.
+  - **Cards**: each is a `Plane(75, 100)` mesh (aspect ≈0.75) with its own `Program` (so each card has independent uniforms + texture). Plane normal +Z means cards face the camera by default.
   - **Textures**: per-card `Texture` loaded from a picsum URL (`https://picsum.photos/seed/ring2-N/360/480`). `uHasMap` flips from 0 → 1 once the image resolves so a fallback colour is shown during load.
   - **Shaders**: see `VERTEX_SHADER` / `FRAGMENT_SHADER` in `scene.ts`. Fragment does diffuse darkening (`uLight`), corner vignette, and `uOpacity * uLoadOpacity` alpha.
 
@@ -54,10 +62,10 @@ Replication of the scroll-driven image-ring flow from `example-2.js` (a 4,250-li
 | Phase | Driver | Effect |
 |---|---|---|
 | **Ring idle** | always | Cards laid out on a vertical XY ring. `ringRoot.rotation.x = baseRotationX (-28°)` for forward perspective. |
-| **Ring hover** | pointer + `(1 - zoom)` gate | Log-scaled ring torque on x/y/z + gaussian per-card lift (160 max) within radius `π · lerp(0.3, 0.15, zoom) · r`. |
+| **Ring hover** | damped pointer + `intro` gate (example-2 `Ar`) | Log-scaled ring torque (x `0.032π`, y `0.025π`, wrapper-z `0.035π`). Per-card gaussian "plane influence" `G = sineInOut(clamp(1 − dist/N)) · intro`, `N = π · lerp(0.3, 0.15, zoom) · r`, distance measured from the card's **live** angle on the spinning ring. `G` drives a **local** face turn `rotationPlane.y = π·G·(1 − pow1out(zoom/0.7))` and a **local** forward push `positionPlane.z = 160·G·(1 − pow1out(zoom))`. No per-card spring — easing comes entirely from the damped pointer (~90ms follow). All three parity formulas live in tested `ring-parity.ts`. |
 | **Zoom** | `zoom: 0→1` (scroll 0→0.5) | Scales whole ring `1 → 3`, rotates wrapper to put featured at θ=−π/2, flattens base tilt by `(1 − zoom·0.8)`, translates ringRoot to centre featured at world (0,0,~0). |
 | **Stack** | `stack: 0→1` (scroll 0.5→1) | Cards lerp from `ringX/Y/Z` to `stackX = offset·36, stackY = 0, stackZ = -|offset|·14`. Container tilts down by 12°. Wrapper rotation unwound by `(1 − stack)` so deck is upright. Opacity = `lerp(1, 0.15 + distanceFalloff·0.5, stack)` where `distanceFalloff = clamp01(1 − |offset|/6)`. |
-| **Stacked hover** | `hoveredIndex` + `stack > 0.6` gate | Spring (130, critical damping) drives `hoverPeek: 0→1`. Card translates +36·peek on Y, +24·peek on Z, opacity boosted to 1, `renderOrder += count*2`. |
+| **Stacked hover** | `hoveredIndex` + `stack > 0.6 && iso < 0.4` gate | Spring (130, critical damping) drives `hoverPeek: 0→1`. `card.root` translates +36·peek on Y, +24·peek on Z, opacity boosted to 1, `renderOrder += count*2`. This is the one hover that keeps the spring (the deck has no damped-pointer follow to ride on). |
 
 ### ScrollTrigger wiring
 
@@ -103,8 +111,8 @@ GSAP tween animates `sceneState.intro: 0 → 1` over 1.6s; the per-card fragment
 ### Verification
 
 - `npm run typecheck` — clean
-- `npm test` — 11/11 passing (existing `ring-layout.test.ts` + `example2-analysis.test.ts`)
-- Manual: navigated `/test` in Chrome via DevTools MCP; screenshotted all 4 phases + hover interactions
+- `app/lib/ring-parity.test.ts` — 7/7 passing (hover face turn, forward push, influence, torque). Full `npm test` not re-run after the hover rework (per workflow preference); run it if you want the whole suite.
+- Manual: navigate `/test`, hover the idle ring — nearby cards should turn toward the cursor and lift off the ring toward the camera, easing in/out smoothly with no spring wobble.
 
 ---
 
@@ -207,19 +215,21 @@ The example morphs between an orthographic and a perspective projection during t
 | Clear color | `(246, 248, 250, 1)/255` | `RING_CLEAR_COLOR` |
 | Logo primary | `#0F3043` | (when implementing logo) |
 | Logo secondary | `#4F97B6` | (when implementing logo) |
-| Card aspect | 51.1 / 68.14 (≈0.75) | matched by Plane(90, 120) |
+| Card aspect | ≈0.75 | matched by Plane(75, 100) |
 | Ring radius (lg) | `328 × scale` | `computeRingRadius()` |
 | Ring radius margin (mobile) | 120 | `computeRingRadius()` |
-| Card count | 24 | `RING_CARD_COUNT` |
+| Card count | 23 | `RING_CARD_COUNT` |
 | Featured index | 15 | `RING_FEATURED_INDEX` |
 | Angle offset | `0.75 × count` | `ringAngleAtIndex()` |
-| Ring base tilt X | −28° (mine; example uses container −π/2 + view rig) | `baseRotationX` |
+| Ring base tilt X | −6° (mine; example uses container −π/2 + view rig) | `baseRotationX` |
 | Zoom scale max | 3.0 (mine; example uses 3.7) | `RING_ZOOM_SCALE` |
-| Hover lift (ring) | 160 | `RING_HOVER_LIFT` |
-| Stack card spacing | 36 (mine; example uses 200 lg / 130 md / 80 sm) | `update()` |
-| Spring stiffness (hover) | 130, critically damped | `hoverSpring` |
-| Ring mouse rot coeffs | 0.025π, 0.04π, 0.02π (mine; example uses 0.035/0.025/0.032) | `update()` |
-| Plane influence radius | `π × lerp(0.3, 0.15, zoom) × r` | `update()` |
+| Hover forward push (ring) | 160 | `RING_CARD_PLANE_FORWARD` / `computeCardPlaneForwardZ()` |
+| Hover face-turn / push attenuation | `1 − pow1out(zoom/0.7)` / `1 − pow1out(zoom)` | `ring-parity.ts` (`easePow1Out`) |
+| Stack card spacing | 30 (mine; example uses 200 lg / 130 md / 80 sm) | `RING_STACK_SPACING_X` |
+| Spring stiffness (stacked hover) | 130, critically damped | `hoverSpring` |
+| Ring mouse rot coeffs | x `0.032π`, y `0.025π`, wrapper-z `0.035π` (matches example) | `update()` |
+| Damped-pointer follow | ~90ms time constant | `pointerDamp` in `update()` |
+| Plane influence radius | `π × lerp(0.3, 0.15, zoom) × r` | `computeCardPlaneInfluence()` |
 | Scroll pin length | 1800px | `SCROLL_LENGTH` in `test.tsx` |
 | Zoom/stack split | 0.5 / 0.5 | `ZOOM_PROGRESS_END` |
 
@@ -236,7 +246,8 @@ app/
 │   │   ├── scene.ts          ← OGL renderer + ring + cards + per-frame update
 │   │   └── spring.ts         ← critical-damped spring (matches test-3.js)
 │   ├── ring-layout.ts        ← (still used by home.tsx; not by /test)
-│   ├── ring-parity.ts        ← (still used by home.tsx; not by /test)
+│   ├── ring-parity.ts        ← tested ring-hover formulas, consumed by /test scene.ts
+│   ├── ring-parity.test.ts   ← unit tests for the hover/torque parity math
 │   └── example2-analysis.ts  ← shared constants extracted from example-2.js
 ├── app.css                   ← `.ogl-ring-*` styles added
 └── routes.ts                 ← `/test` route already registered
@@ -269,6 +280,6 @@ Reference materials in repo root (do NOT edit, they're the source artefacts):
 
 - **Picsum image loads** are slow-ish on first paint. Each card flashes its fallback grey colour until the texture resolves. Could be improved with a preload/warm-up gate before starting the intro tween.
 - **Picking** is screen-space distance based on the card's projected centre, not raycast. Good enough for the deck phase; if you add interactive ring-phase hover-clicks, swap in OGL's `Raycast` extra (`import { Raycast } from 'ogl'`).
-- **`baseRotationX = -28°`** was chosen empirically to look pleasant; the example uses a more complex `containerRoot.rotation.x = -π/2` + offset rig that you may want to reinstate if matching the original camera angle exactly matters.
+- **`baseRotationX = -6°`** was chosen empirically to look pleasant (nearly upright ring); the example uses a more complex `containerRoot.rotation.x = -π/2` + offset rig that you may want to reinstate if matching the original camera angle exactly matters.
 - **Reduced motion** simply skips ScrollTrigger entirely — user sees only the ring-idle state. Consider whether you'd rather show the stacked deck as a static snapshot for these users.
 - The example-2 ring **does not auto-spin**; my implementation also doesn't. If you want gentle idle rotation, add `wrapperRoot.rotation.z += 0.001` (or similar) in the ticker, gated by `(1 - zoom)` so the spin stops during zoom.

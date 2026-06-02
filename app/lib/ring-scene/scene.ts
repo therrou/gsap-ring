@@ -27,8 +27,13 @@ import {
   type OGLRenderingContext,
 } from "ogl";
 import { Spring } from "./spring";
+import {
+  computeCardPlaneFaceRotation,
+  computeCardPlaneForwardZ,
+  computeCardPlaneInfluence,
+} from "../ring-parity";
 
-export const RING_CARD_COUNT = 24;
+export const RING_CARD_COUNT = 23;
 export const RING_FEATURED_INDEX = 15;
 export const RING_CAMERA_FOV = 45;
 export const RING_HOVER_LIFT = 160;
@@ -94,6 +99,17 @@ const FRAGMENT_SHADER = /* glsl */ `
 `;
 
 export type RingCardController = {
+  /**
+   * Per-card transform placed on the ring (carries position + tangent roll +
+   * stack/iso targets). Mirrors example-2's outer card `OGLTransform`
+   * (`position=k`, `rotation=W`).
+   */
+  root: Transform;
+  /**
+   * Inner plane mesh. Only the hover "plane" offsets live here — a local +Z
+   * forward push and a local Y face turn — mirroring example-2's
+   * `positionPlane` / `rotationPlane` applied to the inner Plane.
+   */
   mesh: Mesh;
   index: number;
   isFeatured: boolean;
@@ -103,7 +119,6 @@ export type RingCardController = {
   ringZ: number;
   faceRotationZ: number;
   hoverSpring: Spring;
-  liftSpring: Spring;
 };
 
 export type RingSceneOptions = {
@@ -289,11 +304,18 @@ export function createRingScene({
       program.uniforms.uHasMap.value = 1;
     });
 
+    // example-2 nests the plane inside the card transform so the hover
+    // "plane" offsets (forward push + face turn) are applied in the card's
+    // LOCAL frame, after the card is placed and rolled on the ring. We mirror
+    // that: `root` carries the ring placement, `mesh` carries only the hover.
+    const root = new Transform();
+    root.setParent(containerRoot);
     const mesh = new Mesh(gl, { geometry: planeGeometry, program });
-    mesh.setParent(containerRoot);
+    mesh.setParent(root);
 
     const angle = ringAngleAtIndex(i, count);
     const card: RingCardController = {
+      root,
       mesh,
       index: i,
       isFeatured: i === featuredIndex,
@@ -301,18 +323,21 @@ export function createRingScene({
       ringX: 0,
       ringY: 0,
       ringZ: 0,
-      // Subtle face rotation — cards rotate gently with their position on the
-      // ring so the deck reads as "rolling". Coefficient is small so cards
-      // never tilt far enough to feel chaotic.
-      faceRotationZ: -angle * 0.08,
+      // Cards rotate so their Y-axis aligns with the circle's tangent at this
+      // position — gives the "clock stripe" look where each card faces along
+      // the ring rather than sitting flat-horizontal.
+      faceRotationZ: angle - Math.PI / 2,
       hoverSpring: new Spring({ stiffness: 130, criticalDamping: true }),
-      liftSpring: new Spring({ stiffness: 90, damping: 16 }),
     };
     cards.push(card);
   }
 
   const progressState: RingSceneProgress = { zoom: 0, stack: 0, iso: 0, intro: 0 };
   const pointer: RingPointerState = { x: 0, y: 0, inside: false };
+  // Damped pointer — example-2 drives the ring torque + hover from `mouseDamp`
+  // (an eased follow of the cursor), not the raw pointer, so motion settles in
+  // instead of snapping when the cursor jumps.
+  const pointerDamp = { x: 0, y: 0 };
   let hoveredIndex = -1;
   let viewportWidth = canvas.clientWidth || window.innerWidth;
   let viewportHeight = canvas.clientHeight || window.innerHeight;
@@ -325,11 +350,11 @@ export function createRingScene({
 
     // 0.40 of the viewport height keeps the ring inside the visible area even
     // with the small -6° X tilt and a tiny downward bias added later.
-    const heightCap = height * 0.40;
+    const heightCap = height * 0.5;
 
     // Clamp: at least minRadius (cards touch, no overlap), at most heightCap
-    // (no clipping), and never bigger than 380 (visual consistency).
-    const target = Math.max(minRadius, Math.min(heightCap, 380));
+    // (no clipping), and never bigger than 460 (visual consistency).
+    const target = Math.max(minRadius, Math.min(heightCap, 460));
 
     if (width >= 1280) return target;
     if (width >= 768) {
@@ -443,8 +468,14 @@ export function createRingScene({
      * Mouse-driven ring rotation (matches example §5: log-scaled X offset
      * normalized against ringRadius, attenuated by (1 - zoom)).
      */
-    const pointerOffsetX = pointer.inside ? pointer.x : 0;
-    const pointerOffsetY = pointer.inside ? pointer.y : 0;
+    const pointerTargetX = pointer.inside ? pointer.x : 0;
+    const pointerTargetY = pointer.inside ? pointer.y : 0;
+    // Exponential follow (~90ms time constant), frame-rate independent.
+    const pointerDampFactor = 1 - Math.exp(-deltaMs / 90);
+    pointerDamp.x += (pointerTargetX - pointerDamp.x) * pointerDampFactor;
+    pointerDamp.y += (pointerTargetY - pointerDamp.y) * pointerDampFactor;
+    const pointerOffsetX = pointerDamp.x;
+    const pointerOffsetY = pointerDamp.y;
     const absOffset = Math.abs(pointerOffsetX);
     const normalized =
       radius > 0
@@ -472,16 +503,18 @@ export function createRingScene({
     const tiltEase = easeOutCubic(stack);
     const flattenT = clamp01(zoom * 0.8);
     const activeBaseTilt = baseRotationX * (1 - flattenT);
+    // Multipliers match example-2.js: rotationMouse.x=0.032, rotationMouse.y=0.025
     ringRoot.rotation.x =
-      activeBaseTilt * (1 - tiltEase) + ringForce * Math.PI * 0.025 * (1 - tiltEase);
-    ringRoot.rotation.y = ringForce * Math.PI * 0.04 * (1 - tiltEase);
+      activeBaseTilt * (1 - tiltEase) + ringForce * Math.PI * 0.032 * (1 - tiltEase);
+    ringRoot.rotation.y = ringForce * Math.PI * 0.025 * (1 - tiltEase);
 
     const featuredAngle = ringAngleAtIndex(featuredIndex, count);
     // We want featured to end up at θ = -π/2 (bottom of un-tilted ring).
     const targetWrapperRotation = shortestAngleDelta(featuredAngle, -Math.PI / 2);
     const wrapperZoomRotation = lerp(0, targetWrapperRotation, clamp01((zoom - 0.2) / 0.8));
-    // Unwind the rotation during stack so the deck reads as upright.
-    wrapperRoot.rotation.z = wrapperZoomRotation * (1 - tiltEase);
+    // Wrapper Z: zoom-driven rotation + mouse drag (rotationWrapperDrag.z = g*π*0.035)
+    wrapperRoot.rotation.z =
+      wrapperZoomRotation * (1 - tiltEase) + ringForce * Math.PI * 0.035 * (1 - tiltEase);
 
     /**
      * Centering math: after the wrapper rotation places featured at local
@@ -549,43 +582,55 @@ export function createRingScene({
       const posY = lerp(card.ringY, targetY, tiltEase);
       const posZ = lerp(card.ringZ, targetZ, tiltEase);
 
-      // Stacked-hover spring drives a vertical peek (push the hovered
-      // card UP and slightly forward so the user can read it clearly).
-      // Gated to the horizontal deck phase only — hovering during iso would
-      // ruin the diagonal silhouette.
+      // ─── Stacked-deck hover (index phase) ───────────────────────────────
+      // Spring-driven peek (stiffness 130, critically damped) that raises the
+      // hovered card above the deck. Gated to the horizontal deck phase only —
+      // hovering during iso would ruin the diagonal silhouette.
       const stackedHoverActive = stack > 0.6 && iso < 0.4;
       card.hoverSpring.target =
         stackedHoverActive && hoveredIndex === card.index ? 1 : 0;
       const hoverPeek = card.hoverSpring.step(deltaMs);
-
-      // Ring-phase gaussian lift toward pointer. Distance is measured in
-      // the screen-aligned XY plane (ring is roughly XY before tilt).
-      const dx = card.ringX - pointerOffsetX;
-      const dy = card.ringY - pointerOffsetY;
-      const planeDistance = Math.sqrt(dx * dx + dy * dy);
-      const influenceRadius = Math.PI * lerp(0.3, 0.15, zoom) * radius;
-      let influence = 0;
-      if (influenceRadius > 0 && pointer.inside && stack < 0.4) {
-        const normalizedDistance = clamp01(1 - planeDistance / influenceRadius);
-        influence = 0.5 * (1 - Math.cos(Math.PI * normalizedDistance));
-      }
-      const ringLift = RING_HOVER_LIFT * influence * (1 - zoom);
-      card.liftSpring.target = ringLift;
-      const liftDamped = card.liftSpring.step(deltaMs);
-
-      // Stacked hover: raise card (+Y) and pop forward (+Z) so it sits above
-      // the deck. Magnitudes are in local space, so they get multiplied by
-      // the ring's zoom scale — keep them modest.
       const peekY = hoverPeek * 36;
       const peekZ = hoverPeek * 24;
-      card.mesh.position.set(posX, posY + peekY, posZ + liftDamped + peekZ);
 
-      // Cards have a subtle radial roll while in ring; reset to upright in
-      // stack, then add a tiny shared roll during iso so the diagonal reads
-      // as a slightly tossed deck rather than a perfectly clinical line.
-      const ringFace = card.faceRotationZ + influence * Math.PI * 0.06;
+      // ─── Ring-idle hover (example-2 `Ar`) ───────────────────────────────
+      // Gaussian "plane influence" toward the damped pointer, measured from
+      // the card's live angle on the spinning ring (initial angle + wrapper
+      // rotation). `mouseForce` is the intro gate (0→1), so hover only wakes
+      // up once the ring has finished assembling. No per-card spring — the
+      // ease comes entirely from the damped pointer, exactly like the source.
+      const currentTheta = card.ringAngle + wrapperRoot.rotation.z;
+      const cardLiveX = radius * Math.cos(currentTheta);
+      const cardLiveY = radius * Math.sin(currentTheta);
+      const influence = pointer.inside
+        ? computeCardPlaneInfluence({
+            cardX: cardLiveX,
+            cardY: cardLiveY,
+            pointerOffsetX,
+            pointerOffsetY,
+            ringRadius: radius,
+            mouseForce: intro,
+            zoomProgress: zoom,
+          })
+        : 0;
+      const planeForwardZ = computeCardPlaneForwardZ({ influence, zoomProgress: zoom });
+      const planeFaceY = computeCardPlaneFaceRotation({ influence, zoomProgress: zoom });
+
+      // Ring placement + stacked peek live on the card root (outer transform),
+      // mirroring example-2's `position=k` / `rotation=W`.
+      card.root.position.set(posX, posY + peekY, posZ + peekZ);
+
+      // Tangent roll on the ring, flattening to a gentle shared iso roll.
+      const ringFace = card.faceRotationZ;
       const isoRoll = radians(-3) * isoEase;
-      card.mesh.rotation.z = lerp(ringFace, isoRoll, tiltEase);
+      card.root.rotation.z = lerp(ringFace, isoRoll, tiltEase);
+
+      // Hover "plane" offsets live on the inner mesh, in the card's LOCAL
+      // frame (example-2 `positionPlane` / `rotationPlane`): a forward pop
+      // toward the camera (+Z) and a face turn (Y). Both fade out as the ring
+      // zooms in, so the featured card never carries hover into the deck.
+      card.mesh.position.set(0, 0, planeForwardZ);
+      card.mesh.rotation.y = planeFaceY;
 
       // Opacity blending. During stack, non-featured cards fade in proportion
       // to their distance from featured. During iso the falloff softens and
