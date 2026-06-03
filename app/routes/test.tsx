@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { ScrollSmoother } from "gsap/ScrollSmoother";
 import type { Route } from "./+types/test";
 import {
+  DEFAULT_RING_CONFIG,
   RING_CARD_COUNT,
   RING_FEATURED_INDEX,
   createRingScene,
+  type RingSceneConfig,
   type RingSceneController,
 } from "../lib/ring-scene/scene";
 
-gsap.registerPlugin(ScrollTrigger);
+// ScrollSmoother (free in GSAP 3.13+) gives the Lenis-style inertial scroll the
+// reference uses; it drives ScrollTrigger off the same smoothed scroll position.
+gsap.registerPlugin(ScrollTrigger, ScrollSmoother);
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -36,10 +41,10 @@ const IMAGE_SOURCES = Array.from(
  *   0.70 → 1.00  iso  (deck rotates into a diagonal index)
  */
 const SCROLL_LENGTH = 2600;
-const ZOOM_END = 0.4;
-const STACK_START = 0.36;
-const STACK_END = 0.74;
-const ISO_START = 0.7;
+const ZOOM_END = 0.45;
+const STACK_START = 0.4;
+const STACK_END = 0.7;
+const ISO_START = 0.65;
 const ISO_END = 1.0;
 
 const CATEGORIES = [
@@ -62,13 +67,38 @@ function mapProgress(p: number, start: number, end: number) {
   return Math.min(1, Math.max(0, (p - start) / (end - start)));
 }
 
+// Live-tweak sliders for the debug panel — keyed to RingSceneConfig fields.
+const DEBUG_SLIDERS: {
+  key: keyof RingSceneConfig;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+}[] = [
+  { key: "zoomScaleMax", label: "Zoom scale", min: 1, max: 5, step: 0.05 },
+  { key: "rowScalePullback", label: "Spread scale", min: 0.1, max: 1.2, step: 0.01 },
+  { key: "rowMarginFactor", label: "Spread length", min: 0.4, max: 3, step: 0.05 },
+  { key: "tightScale", label: "Album tightness", min: 0.02, max: 0.6, step: 0.01 },
+  { key: "spineTiltDeg", label: "Spine tilt °", min: -45, max: 45, step: 1 },
+  { key: "containerLeanXDeg", label: "Deck lean °", min: -30, max: 30, step: 1 },
+  { key: "baseTiltXDeg", label: "Ring tilt °", min: -20, max: 20, step: 1 },
+  { key: "cornerRadius", label: "Corner radius", min: 0, max: 30, step: 0.5 },
+  { key: "hoverSlide", label: "Hover slide", min: 0, max: 60, step: 1 },
+];
+
 export default function TestRoute() {
+  const smoothWrapperRef = useRef<HTMLDivElement | null>(null);
+  const smoothContentRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const heroRef = useRef<HTMLDivElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const sceneRef = useRef<RingSceneController | null>(null);
   const [phase, setPhase] = useState<Phase>("ring");
   const [currentCategory, setCurrentCategory] = useState(1);
+  const [debugConfig, setDebugConfig] = useState<RingSceneConfig>(DEFAULT_RING_CONFIG);
+  const [debugScrub, setDebugScrub] = useState(0);
+  const [showDebug, setShowDebug] = useState(true);
 
   const phaseList = useMemo(
     () =>
@@ -92,10 +122,28 @@ export default function TestRoute() {
     const canvasEl: HTMLCanvasElement = canvas;
 
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // Inertial smooth scroll (Lenis-equivalent). Created before the pin so
+    // ScrollTrigger reads the smoothed scroll position. Skipped for reduced
+    // motion so those users get native, instant scrolling.
+    const smoothWrapper = smoothWrapperRef.current;
+    const smoothContent = smoothContentRef.current;
+    let smoother: ScrollSmoother | null = null;
+    if (!prefersReducedMotion && smoothWrapper && smoothContent) {
+      smoother = ScrollSmoother.create({
+        wrapper: smoothWrapper,
+        content: smoothContent,
+        smooth: 1,
+        smoothTouch: 0.1,
+        effects: false,
+      });
+    }
+
     const scene: RingSceneController = createRingScene({
       canvas: canvasEl,
       imageSources: IMAGE_SOURCES,
     });
+    sceneRef.current = scene;
 
     const pointerState = { x: 0, y: 0, inside: false };
     const sceneState = { zoomScroll: 0, stackScroll: 0, isoScroll: 0, intro: 0 };
@@ -130,7 +178,9 @@ export default function TestRoute() {
       pointerState.inside = true;
       scene.setPointer(pointerState);
 
-      if (sceneState.stackScroll > 0.6 && sceneState.isoScroll < 0.4) {
+      // Hover-pick is only meaningful once the cards have spread into the
+      // diagonal row (the iso channel). Before that they're collapsed/zooming.
+      if (sceneState.isoScroll > 0.5) {
         const index = scene.pickAt(event.clientX, event.clientY);
         scene.setHoveredIndex(index ?? -1);
       } else {
@@ -220,65 +270,106 @@ export default function TestRoute() {
       gsap.ticker.remove(tick);
       introTween.kill();
       scrollTrigger?.kill();
+      smoother?.kill();
       cancelAnimationFrame(rafId);
       ro.disconnect();
       canvasEl.removeEventListener("pointermove", handlePointerMove);
       canvasEl.removeEventListener("pointerleave", handlePointerLeave);
       window.removeEventListener("resize", handleResize);
       scene.destroy();
+      sceneRef.current = null;
     };
   }, []);
 
+  // ─── Debug panel handlers ──────────────────────────────────────────────────
+  function updateConfig(key: keyof RingSceneConfig, value: number) {
+    setDebugConfig((prev) => {
+      const next = { ...prev, [key]: value };
+      sceneRef.current?.setConfig({ [key]: value });
+      return next;
+    });
+  }
+
+  // Manually drive the scene to a scroll position for inspecting a phase. The
+  // next real scroll re-takes control via ScrollTrigger.
+  function scrubTo(p: number) {
+    setDebugScrub(p);
+    const scene = sceneRef.current;
+    if (!scene) return;
+    scene.setProgress({
+      zoom: mapProgress(p, 0, ZOOM_END),
+      stack: mapProgress(p, STACK_START, STACK_END),
+      iso: mapProgress(p, ISO_START, ISO_END),
+    });
+    setPhase(phaseFromProgress(p));
+  }
+
   return (
-    <main className="ogl-ring-page">
-      <header className="ogl-ring-topbar">
-        <span className="ogl-ring-mark">◎ Atelier 24</span>
-        <nav className="ogl-ring-nav" aria-label="Sections">
-          <a href="#work">Work</a>
-          <a href="#process">Process</a>
-          <a href="#studio">Studio</a>
-          <a href="#contact">Contact</a>
-        </nav>
-        <ul className="ogl-ring-phases" aria-label="Current phase">
-          {phaseList.map((entry) => (
-            <li key={entry.id} className={entry.id === phase ? "is-active" : undefined}>
-              {entry.label}
-            </li>
+    <>
+      {/* Fixed UI must live OUTSIDE the smoother: ScrollSmoother transforms the
+          content, which would otherwise make position:fixed scroll with it. */}
+
+
+      {showDebug ? (
+        <div className="ring-debug">
+          <div className="ring-debug-head">
+            <strong>Scene tuner</strong>
+            <button type="button" onClick={() => setShowDebug(false)} aria-label="Hide">
+              ×
+            </button>
+          </div>
+
+          <label className="ring-debug-row">
+            <span>Scrub {debugScrub.toFixed(2)}</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.005}
+              value={debugScrub}
+              onChange={(e) => scrubTo(Number(e.target.value))}
+            />
+          </label>
+
+          {DEBUG_SLIDERS.map((s) => (
+            <label key={s.key} className="ring-debug-row">
+              <span>
+                {s.label} {Number(debugConfig[s.key]).toFixed(2)}
+              </span>
+              <input
+                type="range"
+                min={s.min}
+                max={s.max}
+                step={s.step}
+                value={debugConfig[s.key]}
+                onChange={(e) => updateConfig(s.key, Number(e.target.value))}
+              />
+            </label>
           ))}
-        </ul>
-      </header>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="ring-debug-toggle"
+          onClick={() => setShowDebug(true)}
+        >
+          Tune
+        </button>
+      )}
+
+      <div id="smooth-wrapper" ref={smoothWrapperRef}>
+        <div id="smooth-content" ref={smoothContentRef}>
+          <main className="ogl-ring-page">
 
       <section className="ogl-ring-stage" ref={stageRef}>
         <canvas ref={canvasRef} className="ogl-ring-canvas" />
-
-        <div className="ogl-ring-hero-text" ref={heroRef}>
-          <h1>The future is built on Artificial Intelligence.</h1>
-          <p className="ogl-ring-cta">SCROLL TO EXPLORE</p>
-        </div>
-
-        <div className="ogl-ring-panel" ref={panelRef} aria-hidden={phase === "ring"}>
-          <span className="ogl-ring-panel-label">Architecture</span>
-          <span className="ogl-ring-panel-count">{String(13).padStart(2, "0")}</span>
-          <ul className="ogl-ring-panel-list">
-            {CATEGORIES.map((category, index) => (
-              <li
-                key={category}
-                className={index === currentCategory ? "is-active" : undefined}
-              >
-                <span>{category}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-
         <div className="ogl-ring-progress" aria-hidden="true">
           <span className="ogl-ring-progress-dot" />
         </div>
       </section>
-
-      <section className="ogl-ring-footer">
-        <p>{RING_CARD_COUNT} cards · featured #{RING_FEATURED_INDEX} · scroll back to reverse</p>
-      </section>
-    </main>
+          </main>
+        </div>
+      </div>
+    </>
   );
 }

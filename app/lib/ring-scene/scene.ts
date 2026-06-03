@@ -17,9 +17,9 @@
  */
 
 import {
+  Box,
   Camera,
   Mesh,
-  Plane,
   Program,
   Renderer,
   Texture,
@@ -32,18 +32,77 @@ import {
   computeCardPlaneForwardZ,
   computeCardPlaneInfluence,
 } from "../ring-parity";
+import {
+  computeRowTarget,
+  computeZoomScale,
+  dampToward,
+  easePow1InOut,
+  mixProjectionMatrices,
+  orthographicBlendT,
+} from "../ring-stages";
 
 export const RING_CARD_COUNT = 23;
 export const RING_FEATURED_INDEX = 15;
 export const RING_CAMERA_FOV = 45;
 export const RING_HOVER_LIFT = 160;
-/** Per-card horizontal spread when the deck collapses into a stack. */
-export const RING_STACK_SPACING_X = 30;
-/** Per-card depth offset within the stacked deck (negative = farther). */
-export const RING_STACK_SPACING_Z = -8;
-/** Per-card offset along the diagonal iso layout. Larger = longer diagonal. */
-export const RING_ISO_SPACING = 36;
-export const RING_ZOOM_SCALE = 3.0;
+export const RING_ZOOM_SCALE = 3.7;
+
+// ─── Row (final diagonal) tuning ──────────────────────────────────────────────
+/** Scale multiplier on the zoomed ring once the row is fully formed. */
+export const ROW_SCALE_PULLBACK = 0.38;
+/** Viewport margin (× card size) kept clear at the diagonal's ends. Larger →
+ * shorter diagonal → more card overlap. */
+export const ROW_MARGIN_FACTOR = 1.2;
+/** Per-card local depth step in the album stack. Must exceed CARD_THICKNESS so
+ * adjacent slabs don't interpenetrate. */
+export const ROW_DEPTH_STEP = 9;
+/** Thickness of the card slab (the "album" spine), in local units. */
+export const CARD_THICKNESS = 6;
+/** Corner radius of the card face, in px. */
+export const CARD_CORNER_RADIUS = 9;
+/** Neutral colour of the card's edge / spine. */
+export const CARD_EDGE_COLOR: [number, number, number] = [0.82, 0.84, 0.88];
+/** Y-tilt of the stacked row so the album spines read, radians. */
+export const ROW_SPINE_TILT = (14 * Math.PI) / 180;
+/** Compression of the tight "album" stack vs. the full spread (0..1). */
+export const STACK_TIGHT_SCALE = 0.14;
+
+/**
+ * Live-tunable scene parameters (driven by the /test debug panel via
+ * `controller.setConfig`). Angles are in DEGREES here for friendlier sliders.
+ */
+export type RingSceneConfig = {
+  zoomScaleMax: number;
+  rowScalePullback: number;
+  rowMarginFactor: number;
+  tightScale: number;
+  spineTiltDeg: number;
+  containerLeanXDeg: number;
+  baseTiltXDeg: number;
+  cornerRadius: number;
+  hoverSlide: number;
+};
+
+export const DEFAULT_RING_CONFIG: RingSceneConfig = {
+  zoomScaleMax: RING_ZOOM_SCALE,
+  rowScalePullback: ROW_SCALE_PULLBACK,
+  rowMarginFactor: ROW_MARGIN_FACTOR,
+  tightScale: STACK_TIGHT_SCALE,
+  spineTiltDeg: 14,
+  containerLeanXDeg: -6,
+  baseTiltXDeg: 6,
+  cornerRadius: CARD_CORNER_RADIUS,
+  hoverSlide: 15, // = ROW_HOVER_SLIDE (declared below; literal avoids TDZ)
+};
+/**
+ * Row hover, ported from example-2 `PlaneStacked` (positionHover): a critically
+ * damped spring (stiffness 130) drives `damped` toward `ROW_HOVER_TARGET` on the
+ * hovered card and `positionHover3 = (damped, 0, 0)` slides it along its LOCAL
+ * +X — a subtle sideways peek, no forward pop, no render-order change.
+ * `ROW_HOVER_SLIDE` converts the spring's target-2 units into local +X distance.
+ */
+export const ROW_HOVER_TARGET = 2;
+export const ROW_HOVER_SLIDE = 15;
 export const RING_CLEAR_COLOR: [number, number, number, number] = [
   246 / 255,
   248 / 255,
@@ -62,10 +121,12 @@ const VERTEX_SHADER = /* glsl */ `
 
   varying vec2 vUv;
   varying vec3 vNormal;
+  varying vec3 vLocalNormal;
 
   void main() {
     vUv = uv;
     vNormal = normalize(normalMatrix * normal);
+    vLocalNormal = normal;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -79,21 +140,45 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uLight;
   uniform float uHasMap;
   uniform vec3 uFallbackColor;
+  uniform vec3 uEdgeColor;
+  uniform vec2 uHalfSize;      // card face half-extents, px
+  uniform float uCornerRadius; // px
 
   varying vec2 vUv;
   varying vec3 vNormal;
+  varying vec3 vLocalNormal;
+
+  // Signed distance to a rounded rectangle (2D), in px.
+  float sdRoundRect(vec2 p, vec2 halfSize, float radius) {
+    vec2 q = abs(p) - halfSize + radius;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+  }
 
   void main() {
-    vec4 sampled = texture2D(tMap, vUv);
-    vec3 base = mix(uFallbackColor, sampled.rgb, uHasMap);
+    float alpha = uOpacity * uLoadOpacity;
+    vec3 base;
+
+    // Front/back faces (local normal ±Z) show the image; the thin sides are the
+    // album spine and get a flat neutral colour.
+    if (abs(vLocalNormal.z) > 0.5) {
+      vec4 sampled = texture2D(tMap, vUv);
+      base = mix(uFallbackColor, sampled.rgb, uHasMap);
+
+      float vignette = smoothstep(0.45, 1.0, length(vUv - 0.5) * 2.0);
+      base -= vignette * 0.08;
+
+      // Rounded-corner mask in px space so corners are circular, not elliptical.
+      vec2 pPx = (vUv - 0.5) * (uHalfSize * 2.0);
+      float dist = sdRoundRect(pPx, uHalfSize, uCornerRadius);
+      alpha *= 1.0 - smoothstep(0.0, 1.5, dist);
+    } else {
+      base = uEdgeColor;
+    }
 
     float diffuse = max(dot(vNormal, normalize(vec3(-10.0, -10.0, -1.0))), 0.0);
     base -= base * diffuse * 0.6 * uLight;
 
-    float vignette = smoothstep(0.45, 1.0, length(vUv - 0.5) * 2.0);
-    base -= vignette * 0.08;
-
-    float alpha = uOpacity * uLoadOpacity;
+    if (alpha < 0.01) discard;
     gl_FragColor = vec4(base, alpha);
   }
 `;
@@ -119,6 +204,12 @@ export type RingCardController = {
   ringZ: number;
   faceRotationZ: number;
   hoverSpring: Spring;
+  /**
+   * Current (damped) root position. Scroll sets a per-frame target and this
+   * follows it via `dampToward`, mirroring example-2's `p.Damp` deck follow so
+   * the collapse/row transitions trail slightly instead of snapping.
+   */
+  pos: { x: number; y: number; z: number };
 };
 
 export type RingSceneOptions = {
@@ -152,6 +243,8 @@ export type RingSceneController = {
   setPointer: (state: RingPointerState) => void;
   pickAt: (clientX: number, clientY: number) => number | null;
   update: (deltaMs: number) => void;
+  setConfig: (partial: Partial<RingSceneConfig>) => void;
+  getConfig: () => RingSceneConfig;
   destroy: () => void;
   getFeaturedIndex: () => number;
   getCardCount: () => number;
@@ -164,11 +257,6 @@ function clamp01(value: number) {
 function easeOutCubic(t: number) {
   const x = clamp01(t);
   return 1 - Math.pow(1 - x, 3);
-}
-
-function easeInOutCubic(t: number) {
-  const x = clamp01(t);
-  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
 }
 
 function lerp(a: number, b: number, t: number) {
@@ -231,6 +319,14 @@ export function createRingScene({
   camera.position.set(0, 0, 800);
   camera.lookAt([0, 0, 0]);
 
+  // Second camera used only for its orthographic projection matrix. example-2
+  // blends perspective→orthographic as the ring zooms in (bundle ~4036-4054)
+  // so the featured card loses perspective skew at full zoom. We keep both
+  // projection matrices and mix them into `camera.projectionMatrix` per frame.
+  const orthoCamera = new Camera(gl);
+  const perspProjection = new Float32Array(16);
+  const orthoProjection = new Float32Array(16);
+
   const scene = new Transform();
 
   /**
@@ -260,20 +356,21 @@ export function createRingScene({
    */
   const cardWidth = 75;
   const cardHeight = 100;
-  const planeGeometry = new Plane(gl, {
+  // A thin box gives each card real thickness (the "album" slab): the front/back
+  // faces carry the image, the thin sides read as a neutral spine.
+  const cardGeometry = new Box(gl, {
     width: cardWidth,
     height: cardHeight,
-    widthSegments: 1,
-    heightSegments: 1,
+    depth: CARD_THICKNESS,
   });
 
   const cards: RingCardController[] = [];
   /**
-   * Ring tilt. The reference design sits nearly upright — just enough X-tilt
-   * to give a hint of perspective without pushing top-row cards into the same
-   * screen-space as bottom-row cards (which would create the Z-fighting look).
+   * Ring tilt. Nearly upright, tipped so the TOP arc of the ring faces the
+   * camera (positive X) — matching the reference, where the featured card
+   * sweeps in from the top rather than the bottom.
    */
-  const baseRotationX = radians(-6);
+  const baseRotationX = radians(6);
   ringRoot.rotation.x = baseRotationX;
 
   const pendingTexturePromises: Promise<void>[] = [];
@@ -287,9 +384,13 @@ export function createRingScene({
       vertex: VERTEX_SHADER,
       fragment: FRAGMENT_SHADER,
       transparent: true,
-      cullFace: null,
-      depthWrite: true,
-      depthTest: true,
+      // Backface culling lets the thin slabs render correctly without a depth
+      // buffer: only camera-facing faces draw, ordered between cards by
+      // renderOrder (painter's). Keeps all cards the same size (z=0, no depth
+      // fighting), which depth-testing coplanar slabs could not.
+      cullFace: gl.BACK,
+      depthWrite: false,
+      depthTest: false,
       uniforms: {
         tMap: { value: texture },
         uOpacity: { value: 1 },
@@ -297,6 +398,9 @@ export function createRingScene({
         uLight: { value: 0 },
         uHasMap: { value: 0 },
         uFallbackColor: { value: [0.86, 0.89, 0.95] },
+        uEdgeColor: { value: CARD_EDGE_COLOR },
+        uHalfSize: { value: [cardWidth * 0.5, cardHeight * 0.5] },
+        uCornerRadius: { value: CARD_CORNER_RADIUS },
       },
     });
 
@@ -310,7 +414,7 @@ export function createRingScene({
     // that: `root` carries the ring placement, `mesh` carries only the hover.
     const root = new Transform();
     root.setParent(containerRoot);
-    const mesh = new Mesh(gl, { geometry: planeGeometry, program });
+    const mesh = new Mesh(gl, { geometry: cardGeometry, program });
     mesh.setParent(root);
 
     const angle = ringAngleAtIndex(i, count);
@@ -328,11 +432,13 @@ export function createRingScene({
       // the ring rather than sitting flat-horizontal.
       faceRotationZ: angle - Math.PI / 2,
       hoverSpring: new Spring({ stiffness: 130, criticalDamping: true }),
+      pos: { x: 0, y: 0, z: 0 },
     };
     cards.push(card);
   }
 
   const progressState: RingSceneProgress = { zoom: 0, stack: 0, iso: 0, intro: 0 };
+  const config: RingSceneConfig = { ...DEFAULT_RING_CONFIG };
   const pointer: RingPointerState = { x: 0, y: 0, inside: false };
   // Damped pointer — example-2 drives the ring torque + hover from `mouseDamp`
   // (an eased follow of the cursor), not the raw pointer, so motion settles in
@@ -373,6 +479,18 @@ export function createRingScene({
     const distance = height / (2 * Math.tan((RING_CAMERA_FOV * Math.PI) / 180 / 2));
     camera.position.set(0, 0, distance);
     camera.lookAt([0, 0, 0]);
+    // Snapshot the perspective projection, then build a matching orthographic
+    // one (same view volume in CSS px so 1 unit stays 1 px at the focal plane).
+    perspProjection.set(camera.projectionMatrix);
+    orthoCamera.orthographic({
+      left: -width / 2,
+      right: width / 2,
+      top: height / 2,
+      bottom: -height / 2,
+      near: 1,
+      far: 8000,
+    });
+    orthoProjection.set(orthoCamera.projectionMatrix);
   }
 
   function setSize(width: number, height: number) {
@@ -406,6 +524,20 @@ export function createRingScene({
     hoveredIndex = index;
   }
 
+  function setConfig(partial: Partial<RingSceneConfig>) {
+    Object.assign(config, partial);
+    // Corner radius is a uniform — push it to every card immediately.
+    if (partial.cornerRadius !== undefined) {
+      for (const card of cards) {
+        card.mesh.program.uniforms.uCornerRadius.value = config.cornerRadius;
+      }
+    }
+  }
+
+  function getConfig(): RingSceneConfig {
+    return { ...config };
+  }
+
   function setPointer(state: RingPointerState) {
     pointer.x = state.x;
     pointer.y = state.y;
@@ -413,10 +545,11 @@ export function createRingScene({
   }
 
   /**
-   * Lightweight screen-space picking: project each card's world position
-   * onto the screen, see which (if any) the cursor is inside. When several
-   * cards overlap (deck phase) we prefer the one with the largest world Z
-   * — i.e. the card visually on top.
+   * Lightweight screen-space picking: project each card's world centre onto the
+   * screen and test the cursor against the card's projected rect. When cards
+   * overlap (the spread row) we return the **frontmost** card — the one with the
+   * highest `renderOrder`, i.e. the one drawn on top — so the pick matches what
+   * the user sees and doesn't flicker between overlapping cards.
    */
   function pickAt(clientX: number, clientY: number): number | null {
     const rect = canvas.getBoundingClientRect();
@@ -424,7 +557,7 @@ export function createRingScene({
     const py = clientY - rect.top;
 
     let bestIndex: number | null = null;
-    let bestZ = -Infinity;
+    let bestOrder = -Infinity;
     const focal = rect.height / (2 * Math.tan((RING_CAMERA_FOV * Math.PI) / 180 / 2));
     const cameraZ = camera.position.z;
 
@@ -442,12 +575,16 @@ export function createRingScene({
       const screenX = (tx * focal) / denom + rect.width * 0.5;
       const screenY = -(ty * focal) / denom + rect.height * 0.5;
 
-      const halfWidth = cardWidth * 0.5 * (focal / denom);
-      const halfHeight = cardHeight * 0.5 * (focal / denom);
+      // World scale of the card's axes (the ring/zoom scale is baked into the
+      // world matrix), so the hit-rect tracks the card's true on-screen size.
+      const worldScaleX = Math.hypot(matrix[0], matrix[1], matrix[2]);
+      const worldScaleY = Math.hypot(matrix[4], matrix[5], matrix[6]);
+      const halfWidth = cardWidth * 0.5 * worldScaleX * (focal / denom);
+      const halfHeight = cardHeight * 0.5 * worldScaleY * (focal / denom);
 
       if (Math.abs(px - screenX) <= halfWidth && Math.abs(py - screenY) <= halfHeight) {
-        if (tz > bestZ) {
-          bestZ = tz;
+        if (card.mesh.renderOrder > bestOrder) {
+          bestOrder = card.mesh.renderOrder;
           bestIndex = card.index;
         }
       }
@@ -485,120 +622,108 @@ export function createRingScene({
         : 0;
     const ringForce = Math.sign(pointerOffsetX) * normalized * (1 - zoom);
 
-    /**
-     * Zoom phase — rotate the ring around its own Z so the featured card
-     * lands at θ = -π/2 (bottom of the un-tilted ring), then scale up and
-     * translate so the featured card sits at world (0, 0, ~0) — i.e. dead
-     * center on the screen. As zoom progresses we also flatten the ring
-     * tilt so the featured card faces camera squarely.
-     */
+    // ─── Stage 1: zoom (RingZoom `Ir`) ───────────────────────────────────────
+    // Scale the whole ring up, rotate featured toward the top, and lift it to
+    // screen-centre. The centring frame (wrapper rotation + ring lift) then
+    // UNWINDS as the deck forms (`* (1 - stackEase)`) so by stack=1 the frame is
+    // screen-aligned and the diagonal row can be laid out in clean px space.
     const zoomEase = easeOutCubic(zoom);
-    // During iso we pull the camera back (effectively) by shrinking the
-    // ringRoot scale so the long diagonal stack fits comfortably on screen.
-    const isoEaseForScale = easeInOutCubic(iso);
-    const isoPullback = lerp(1, 0.55, isoEaseForScale);
-    const zoomScale = lerp(1, RING_ZOOM_SCALE, zoomEase) * isoPullback;
+    const stackEase = easeOutCubic(stack);
+    const rowProgress = iso; // the `iso` channel drives the spread of the album
+    const rowEase = easePow1InOut(rowProgress);
+    const gatherT = stackEase; // ring → tight album stack
+    const spreadT = rowEase; // tight album → full spread
+    // Ring zooms up to centre featured; once the album forms it pulls back to a
+    // comfortable size. Positions are divided by this scale so layout holds.
+    const zoomScale =
+      computeZoomScale(zoom, config.zoomScaleMax) * lerp(1, config.rowScalePullback, spreadT);
     ringRoot.scale.set(zoomScale, zoomScale, zoomScale);
 
-    const tiltEase = easeOutCubic(stack);
+    const baseTilt = radians(config.baseTiltXDeg);
     const flattenT = clamp01(zoom * 0.8);
-    const activeBaseTilt = baseRotationX * (1 - flattenT);
-    // Multipliers match example-2.js: rotationMouse.x=0.032, rotationMouse.y=0.025
+    const activeBaseTilt = baseTilt * (1 - flattenT);
+    // Mouse torque multipliers match example-2 `Ar`: x 0.032π, y 0.025π.
     ringRoot.rotation.x =
-      activeBaseTilt * (1 - tiltEase) + ringForce * Math.PI * 0.032 * (1 - tiltEase);
-    ringRoot.rotation.y = ringForce * Math.PI * 0.025 * (1 - tiltEase);
+      activeBaseTilt * (1 - gatherT) + ringForce * Math.PI * 0.032 * (1 - gatherT);
+    ringRoot.rotation.y = ringForce * Math.PI * 0.025 * (1 - gatherT);
 
+    // Featured → top of the ring, then the ring drops so featured lands centre
+    // (sweeps DOWN from the top). The centring frame UNWINDS during the gather,
+    // so the album/deck is laid out in clean screen-aligned space.
     const featuredAngle = ringAngleAtIndex(featuredIndex, count);
-    // We want featured to end up at θ = -π/2 (bottom of un-tilted ring).
-    const targetWrapperRotation = shortestAngleDelta(featuredAngle, -Math.PI / 2);
+    const targetWrapperRotation = shortestAngleDelta(featuredAngle, Math.PI / 2);
     const wrapperZoomRotation = lerp(0, targetWrapperRotation, clamp01((zoom - 0.2) / 0.8));
-    // Wrapper Z: zoom-driven rotation + mouse drag (rotationWrapperDrag.z = g*π*0.035)
     wrapperRoot.rotation.z =
-      wrapperZoomRotation * (1 - tiltEase) + ringForce * Math.PI * 0.035 * (1 - tiltEase);
+      wrapperZoomRotation * (1 - gatherT) + ringForce * Math.PI * 0.035 * (1 - gatherT);
 
-    /**
-     * Centering math: after the wrapper rotation places featured at local
-     * (0, -r, 0) and the (damped) base X-tilt is applied, featured ends up
-     * at parent-local (0, -r·cos(tilt), r·sin(|tilt|)). Translating the
-     * ringRoot by +scale * |featured.y| moves featured to world Y = 0.
-     */
-    const tiltCos = Math.cos(activeBaseTilt);
-    const tiltSin = Math.sin(Math.abs(activeBaseTilt));
-    const featuredLocalY = -radius * tiltCos;
-    const featuredLocalZ = radius * tiltSin;
+    const featuredLocalY = radius * Math.cos(activeBaseTilt); // featured at top (+r)
     const centerYTarget = -zoomScale * featuredLocalY;
-    const centerZTarget = -zoomScale * featuredLocalZ * 0.4; // partial pull-back
-    // Baseline ring-phase offset so the ring sits a touch below the viewport
-    // centre — keeps the top of the circle clear of the top nav bar and lets
-    // the centred hero text breathe just above the ring's geometric centre.
     const ringRestOffsetY = -viewportHeight * 0.05;
     ringRoot.position.y =
-      ringRestOffsetY * (1 - zoomEase) + centerYTarget * zoomEase * (1 - tiltEase);
-    ringRoot.position.z = centerZTarget * zoomEase * (1 - tiltEase);
+      ringRestOffsetY * (1 - zoomEase) + centerYTarget * zoomEase * (1 - gatherT);
+    ringRoot.position.z = 0;
 
-    /**
-     * Per-card placement: blend ring → stacked deck → diagonal iso layout.
-     *
-     *  - Stack phase: cards fan horizontally behind featured, container tilts
-     *    forward slightly so the deck reads as "lying down" toward the viewer.
-     *  - Iso phase:   cards re-stack along a diagonal going up-and-right, with
-     *    featured at the bottom-front and successive cards receding into the
-     *    distance. Visually matches the "category drill-in" layout where the
-     *    card list extends diagonally beside a category label panel.
-     */
-    const isoEase = easeInOutCubic(iso);
-    const stackOnlyEase = tiltEase * (1 - isoEase);
+    // ─── Album/deck tilt ─────────────────────────────────────────────────────
+    // Cards stay square to camera (no in-plane roll); a small Y-tilt on the
+    // whole deck turns each slab just enough to reveal its thick edge / spine,
+    // plus a gentle forward lean. Comes up as the album forms and holds through
+    // the spread.
+    const deckTiltT = Math.max(gatherT, spreadT);
+    containerRoot.rotation.x = radians(config.containerLeanXDeg) * deckTiltT;
+    containerRoot.rotation.y = radians(config.spineTiltDeg) * deckTiltT;
+    containerRoot.rotation.z = 0;
 
-    // Container takes a gentle forward tilt during stack, then rotates a bit
-    // further (and adds a small Y twist) during iso so the diagonal projects
-    // up-right rather than straight back.
-    containerRoot.rotation.x = lerp(0, radians(-14), tiltEase) + lerp(0, radians(-6), isoEase);
-    containerRoot.rotation.y = lerp(0, radians(8), isoEase);
-    containerRoot.rotation.z = lerp(0, radians(4), isoEase);
+    const rowHoverActive = rowProgress > 0.5;
 
     cards.forEach((card) => {
-      // ─── Stack target ────────────────────────────────────────────────────
-      // Featured sits at center, neighbours fan horizontally with a quadratic
-      // depth fall-off. Reads as a tightly packed "deck" with featured on top.
-      const stackOffset = card.index - featuredIndex;
-      const stackX = stackOffset * RING_STACK_SPACING_X;
-      const stackY = 0;
-      const stackZ = RING_STACK_SPACING_Z * Math.abs(stackOffset);
+      const isFeatured = card.index === featuredIndex;
 
-      // ─── Iso target ──────────────────────────────────────────────────────
-      // Re-index so featured = 0 and wrap around (mod count) — this gives the
-      // diagonal a single unbroken stack starting from featured at front.
-      // Diagonal direction: right (+X), up (+Y), away (−Z).
-      const isoStackPos = ((card.index - featuredIndex) + count) % count;
-      const isoX = isoStackPos * RING_ISO_SPACING * 0.7;
-      const isoY = isoStackPos * RING_ISO_SPACING * 0.7;
-      const isoZ = -isoStackPos * RING_ISO_SPACING * 0.9;
+      // Deck order: featured is the FIRST card (slot 0, front of the stack), the
+      // rest follow in index order. Matches example-2's `r = [featured, ...]`, so
+      // the centred card anchors the front of the album/diagonal instead of
+      // sitting in the middle of the stack.
+      const deckIndex = isFeatured
+        ? 0
+        : card.index < featuredIndex
+          ? card.index + 1
+          : card.index;
 
-      // Blend stack → iso first, then ring → (stack/iso) by tiltEase.
-      const targetX = lerp(stackX, isoX, isoEase);
-      const targetY = lerp(stackY, isoY, isoEase);
-      const targetZ = lerp(stackZ, isoZ, isoEase);
-      const posX = lerp(card.ringX, targetX, tiltEase);
-      const posY = lerp(card.ringY, targetY, tiltEase);
-      const posZ = lerp(card.ringZ, targetZ, tiltEase);
+      // Full diagonal spread position (px), plus the compressed "tight album"
+      // version of the same arrangement. Every card stays at z = 0 so under the
+      // orthographic projection they all render the SAME size (no perspective
+      // falloff toward the back of the stack).
+      const row = computeRowTarget({
+        index: deckIndex,
+        count,
+        part4: 1,
+        viewportWidth,
+        viewportHeight,
+        cardHalf: Math.max(cardWidth, cardHeight) * config.rowMarginFactor,
+      });
+      const fullX = row.x / zoomScale;
+      const fullY = row.y / zoomScale;
+      const tightX = fullX * config.tightScale;
+      const tightY = fullY * config.tightScale;
 
-      // ─── Stacked-deck hover (index phase) ───────────────────────────────
-      // Spring-driven peek (stiffness 130, critically damped) that raises the
-      // hovered card above the deck. Gated to the horizontal deck phase only —
-      // hovering during iso would ruin the diagonal silhouette.
-      const stackedHoverActive = stack > 0.6 && iso < 0.4;
-      card.hoverSpring.target =
-        stackedHoverActive && hoveredIndex === card.index ? 1 : 0;
-      const hoverPeek = card.hoverSpring.step(deltaMs);
-      const peekY = hoverPeek * 36;
-      const peekZ = hoverPeek * 24;
+      // ring → tight album stack (gather), then tight → full spread (expand).
+      const gatheredX = lerp(card.ringX, tightX, gatherT);
+      const gatheredY = lerp(card.ringY, tightY, gatherT);
+      const targetX = lerp(gatheredX, fullX, spreadT);
+      const targetY = lerp(gatheredY, fullY, spreadT);
 
-      // ─── Ring-idle hover (example-2 `Ar`) ───────────────────────────────
-      // Gaussian "plane influence" toward the damped pointer, measured from
-      // the card's live angle on the spinning ring (initial angle + wrapper
-      // rotation). `mouseForce` is the intro gate (0→1), so hover only wakes
-      // up once the ring has finished assembling. No per-card spring — the
-      // ease comes entirely from the damped pointer, exactly like the source.
+      // Damped follow (example-2 `p.Damp`): crisp on the idle ring, trailing as
+      // the cards gather and spread.
+      const dampRate = lerp(0.22, 0.06, Math.max(gatherT, spreadT));
+      card.pos.x = dampToward(card.pos.x, targetX, dampRate, deltaMs);
+      card.pos.y = dampToward(card.pos.y, targetY, dampRate, deltaMs);
+      card.pos.z = dampToward(card.pos.z, 0, dampRate, deltaMs);
+      card.root.position.set(card.pos.x, card.pos.y, card.pos.z);
+
+      // Square up the cards as they gather — no in-plane roll in the album/row
+      // (the album angle comes from the deck Y-tilt, not a per-card skew).
+      card.root.rotation.z = lerp(card.faceRotationZ, 0, gatherT);
+
+      // ─── Ring-idle hover (example-2 `Ar`) ────────────────────────────────
       const currentTheta = card.ringAngle + wrapperRoot.rotation.z;
       const cardLiveX = radius * Math.cos(currentTheta);
       const cardLiveY = radius * Math.sin(currentTheta);
@@ -616,60 +741,50 @@ export function createRingScene({
       const planeForwardZ = computeCardPlaneForwardZ({ influence, zoomProgress: zoom });
       const planeFaceY = computeCardPlaneFaceRotation({ influence, zoomProgress: zoom });
 
-      // Ring placement + stacked peek live on the card root (outer transform),
-      // mirroring example-2's `position=k` / `rotation=W`.
-      card.root.position.set(posX, posY + peekY, posZ + peekZ);
+      // ─── Stage 4: row hover peek (PlaneStacked `K`/`U`) ───────────────────
+      // Spring (130, critical) → target 2 on the hovered card; positionHover3 =
+      // (damped, 0, 0) slides it along its LOCAL +X. A subtle sideways peek out
+      // of the fan — exactly as in example-2 (no forward pop, no reorder).
+      card.hoverSpring.target =
+        rowHoverActive && hoveredIndex === card.index ? ROW_HOVER_TARGET : 0;
+      const hoverPeek = card.hoverSpring.step(deltaMs);
+      const hoverSlideX = hoverPeek * config.hoverSlide;
 
-      // Tangent roll on the ring, flattening to a gentle shared iso roll.
-      const ringFace = card.faceRotationZ;
-      const isoRoll = radians(-3) * isoEase;
-      card.root.rotation.z = lerp(ringFace, isoRoll, tiltEase);
-
-      // Hover "plane" offsets live on the inner mesh, in the card's LOCAL
-      // frame (example-2 `positionPlane` / `rotationPlane`): a forward pop
-      // toward the camera (+Z) and a face turn (Y). Both fade out as the ring
-      // zooms in, so the featured card never carries hover into the deck.
-      card.mesh.position.set(0, 0, planeForwardZ);
+      // Inner mesh carries every LOCAL offset: the idle-ring forward push (+Z) +
+      // face turn (Y), and the row peek (+X). Mutually exclusive by phase.
+      card.mesh.position.set(hoverSlideX, 0, planeForwardZ);
       card.mesh.rotation.y = planeFaceY;
 
-      // Opacity blending. During stack, non-featured cards fade in proportion
-      // to their distance from featured. During iso the falloff softens and
-      // re-uses the iso stack distance so deeper cards fade gracefully into
-      // the background plane.
+      // ─── Opacity ─────────────────────────────────────────────────────────
+      // Cards do NOT fade out — every card stays visible and gathers into the
+      // album stack behind featured, then spreads. Only the intro load-fade and
+      // a tiny shading on the idle ring apply.
       const program = card.mesh.program;
-      const stackFalloff = clamp01(1 - Math.abs(stackOffset) / 6);
-      const stackedOpacity =
-        card.index === featuredIndex
-          ? 1
-          : lerp(1, 0.15 + stackFalloff * 0.5, stackOnlyEase);
-
-      const isoFalloff = clamp01(1 - isoStackPos / 14);
-      const isoOpacity =
-        card.index === featuredIndex
-          ? 1
-          : lerp(0.5, 1, isoFalloff);
-      const stackToIsoOpacity = lerp(stackedOpacity, isoOpacity, isoEase);
-      const hoverOpacityBoost = (1 - stackToIsoOpacity) * hoverPeek;
-      program.uniforms.uOpacity.value = stackToIsoOpacity + hoverOpacityBoost;
-      program.uniforms.uLight.value =
-        card.index === featuredIndex
-          ? 0
-          : stackOnlyEase * 0.7 * (1 - stackFalloff * 0.4) * (1 - hoverPeek);
+      program.uniforms.uOpacity.value = 1;
+      program.uniforms.uLight.value = 0;
 
       // Intro stagger fade-in across the first 60% of the intro.
       const introOffset = card.index / count;
       const introLocal = clamp01((intro - introOffset * 0.4) / 0.6);
       program.uniforms.uLoadOpacity.value = introLocal;
 
-      // Render order. In stack phase the featured card always wins; in iso
-      // we order by isoStackPos so the front card (featured) renders on top
-      // and successive cards stack behind it visually.
-      const isoOrder = count - isoStackPos;
-      const stackOrder = card.index === featuredIndex ? count + 10 : count - Math.abs(stackOffset);
-      const baseOrder = lerp(stackOrder, isoOrder, isoEase);
-      const hoverBoost = hoverPeek > 0.05 ? count * 2 : 0;
-      card.mesh.renderOrder = baseOrder + hoverBoost;
+      // Render order (painter's, no depth buffer): featured (deck slot 0) is the
+      // front of the album; the rest step back by deck order. Hovered card is
+      // unchanged — example-2 doesn't reorder on hover.
+      card.mesh.renderOrder = count - deckIndex;
     });
+
+    // ─── Camera: perspective (ring) → orthographic (album + spread) ──────────
+    // Orthographic once the album forms so every card renders the SAME size
+    // regardless of its place in the stack (no perspective falloff). The ring
+    // itself stays in perspective for depth.
+    const orthoT = Math.max(orthographicBlendT(zoom), gatherT, spreadT);
+    mixProjectionMatrices(
+      perspProjection,
+      orthoProjection,
+      orthoT,
+      camera.projectionMatrix as unknown as number[],
+    );
 
     renderer.render({ scene, camera });
   }
@@ -698,6 +813,8 @@ export function createRingScene({
     setPointer,
     pickAt,
     update,
+    setConfig,
+    getConfig,
     destroy,
     getFeaturedIndex: () => featuredIndex,
     getCardCount: () => count,
