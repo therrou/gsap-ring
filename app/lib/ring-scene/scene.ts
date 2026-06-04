@@ -122,11 +122,13 @@ const VERTEX_SHADER = /* glsl */ `
   varying vec2 vUv;
   varying vec3 vNormal;
   varying vec3 vLocalNormal;
+  varying vec3 vLocalPos;
 
   void main() {
     vUv = uv;
     vNormal = normalize(normalMatrix * normal);
     vLocalNormal = normal;
+    vLocalPos = position;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -140,13 +142,13 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uLight;
   uniform float uHasMap;
   uniform vec3 uFallbackColor;
-  uniform vec3 uEdgeColor;
   uniform vec2 uHalfSize;      // card face half-extents, px
   uniform float uCornerRadius; // px
 
   varying vec2 vUv;
   varying vec3 vNormal;
   varying vec3 vLocalNormal;
+  varying vec3 vLocalPos;
 
   // Signed distance to a rounded rectangle (2D), in px.
   float sdRoundRect(vec2 p, vec2 halfSize, float radius) {
@@ -156,23 +158,24 @@ const FRAGMENT_SHADER = /* glsl */ `
 
   void main() {
     float alpha = uOpacity * uLoadOpacity;
-    vec3 base;
 
-    // Front/back faces (local normal ±Z) show the image; the thin sides are the
-    // album spine and get a flat neutral colour.
+    // Sample the image by the fragment's position projected onto the front face
+    // (NOT the per-face uv). On the front/back this is the full image; on the
+    // thin side faces one axis is pinned to the card edge, so the side shows the
+    // image's edge pixels extruded along the thickness — the whole slab is
+    // "filled" with the picture, no empty spine.
+    vec2 faceUv = vLocalPos.xy / (uHalfSize * 2.0) + 0.5;
+    vec4 sampled = texture2D(tMap, faceUv);
+    vec3 base = mix(uFallbackColor, sampled.rgb, uHasMap);
+
+    // Front/back faces get the vignette + rounded-corner mask. (Sides are thin
+    // and stay full-bleed so the wrap reads as a solid printed block.)
     if (abs(vLocalNormal.z) > 0.5) {
-      vec4 sampled = texture2D(tMap, vUv);
-      base = mix(uFallbackColor, sampled.rgb, uHasMap);
-
-      float vignette = smoothstep(0.45, 1.0, length(vUv - 0.5) * 2.0);
+      float vignette = smoothstep(0.45, 1.0, length(faceUv - 0.5) * 2.0);
       base -= vignette * 0.08;
 
-      // Rounded-corner mask in px space so corners are circular, not elliptical.
-      vec2 pPx = (vUv - 0.5) * (uHalfSize * 2.0);
-      float dist = sdRoundRect(pPx, uHalfSize, uCornerRadius);
+      float dist = sdRoundRect(vLocalPos.xy, uHalfSize, uCornerRadius);
       alpha *= 1.0 - smoothstep(0.0, 1.5, dist);
-    } else {
-      base = uEdgeColor;
     }
 
     float diffuse = max(dot(vNormal, normalize(vec3(-10.0, -10.0, -1.0))), 0.0);
@@ -203,6 +206,15 @@ export type RingCardController = {
   ringY: number;
   ringZ: number;
   faceRotationZ: number;
+  /**
+   * Intro "appear" seeds, matching the original DOM/CSS intro: each card sits in
+   * a SHUFFLED row column (`introColumn`, a permutation of 0..count-1) at a
+   * random height (`scatterNY ∈ [-1,1] × viewport`), fades in on a random delay
+   * (`introDelayN ∈ [0,1]`), then collapses vertically into the centred row.
+   */
+  introColumn: number;
+  scatterNY: number;
+  introDelayN: number;
   hoverSpring: Spring;
   /**
    * Current (damped) root position. Scroll sets a per-frame target and this
@@ -365,6 +377,16 @@ export function createRingScene({
   });
 
   const cards: RingCardController[] = [];
+
+  // Shuffled column assignment for the intro (a permutation of 0..count-1), so
+  // cards collapse into the centred row in a scrambled order — mirrors the
+  // original DOM intro's `shuffledIndices` column shuffle.
+  const introColumns = Array.from({ length: count }, (_, i) => i);
+  for (let i = introColumns.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [introColumns[i], introColumns[j]] = [introColumns[j], introColumns[i]];
+  }
+
   /**
    * Ring tilt. Nearly upright, tipped so the TOP arc of the ring faces the
    * camera (positive X) — matching the reference, where the featured card
@@ -398,7 +420,6 @@ export function createRingScene({
         uLight: { value: 0 },
         uHasMap: { value: 0 },
         uFallbackColor: { value: [0.86, 0.89, 0.95] },
-        uEdgeColor: { value: CARD_EDGE_COLOR },
         uHalfSize: { value: [cardWidth * 0.5, cardHeight * 0.5] },
         uCornerRadius: { value: CARD_CORNER_RADIUS },
       },
@@ -431,6 +452,9 @@ export function createRingScene({
       // position — gives the "clock stripe" look where each card faces along
       // the ring rather than sitting flat-horizontal.
       faceRotationZ: angle - Math.PI / 2,
+      introColumn: introColumns[i],
+      scatterNY: Math.random() * 2 - 1,
+      introDelayN: Math.random(),
       hoverSpring: new Spring({ stiffness: 130, criticalDamping: true }),
       pos: { x: 0, y: 0, z: 0 },
     };
@@ -445,6 +469,9 @@ export function createRingScene({
   // instead of snapping when the cursor jumps.
   const pointerDamp = { x: 0, y: 0 };
   let hoveredIndex = -1;
+  // On the first frame we snap each card's damped position straight to its
+  // target so the intro starts from the scattered layout (no settle from 0,0).
+  let needsPositionSnap = true;
   let viewportWidth = canvas.clientWidth || window.innerWidth;
   let viewportHeight = canvas.clientHeight || window.innerHeight;
 
@@ -633,6 +660,10 @@ export function createRingScene({
     const rowEase = easePow1InOut(rowProgress);
     const gatherT = stackEase; // ring → tight album stack
     const spreadT = rowEase; // tight album → full spread
+    // Intro "row → ring" progress (global mirror of the per-card `introToRing`).
+    // While < 1 the centred row should read FLAT like the original DOM intro, so
+    // the ring tilt + rest offset only fade in as the ring forms.
+    const introRingT = easePow1InOut(clamp01((intro - 0.5) / 0.5));
     // Ring zooms up to centre featured; once the album forms it pulls back to a
     // comfortable size. Positions are divided by this scale so layout holds.
     const zoomScale =
@@ -641,11 +672,13 @@ export function createRingScene({
 
     const baseTilt = radians(config.baseTiltXDeg);
     const flattenT = clamp01(zoom * 0.8);
-    const activeBaseTilt = baseTilt * (1 - flattenT);
+    // Tilt fades in with the ring (introRingT): flat row during the intro.
+    const activeBaseTilt = baseTilt * (1 - flattenT) * introRingT;
     // Mouse torque multipliers match example-2 `Ar`: x 0.032π, y 0.025π.
+    // Suppressed during the intro so the centred row sits still and flat.
     ringRoot.rotation.x =
-      activeBaseTilt * (1 - gatherT) + ringForce * Math.PI * 0.032 * (1 - gatherT);
-    ringRoot.rotation.y = ringForce * Math.PI * 0.025 * (1 - gatherT);
+      activeBaseTilt * (1 - gatherT) + ringForce * Math.PI * 0.032 * (1 - gatherT) * introRingT;
+    ringRoot.rotation.y = ringForce * Math.PI * 0.025 * (1 - gatherT) * introRingT;
 
     // Featured → top of the ring, then the ring drops so featured lands centre
     // (sweeps DOWN from the top). The centring frame UNWINDS during the gather,
@@ -659,8 +692,10 @@ export function createRingScene({
     const featuredLocalY = radius * Math.cos(activeBaseTilt); // featured at top (+r)
     const centerYTarget = -zoomScale * featuredLocalY;
     const ringRestOffsetY = -viewportHeight * 0.05;
+    // Rest offset (ring sits slightly low) also fades in with the ring, so the
+    // intro row is centred on screen like the flat DOM original.
     ringRoot.position.y =
-      ringRestOffsetY * (1 - zoomEase) + centerYTarget * zoomEase * (1 - gatherT);
+      ringRestOffsetY * (1 - zoomEase) * introRingT + centerYTarget * zoomEase * (1 - gatherT);
     ringRoot.position.z = 0;
 
     // ─── Album/deck tilt ─────────────────────────────────────────────────────
@@ -705,18 +740,45 @@ export function createRingScene({
       const tightX = fullX * config.tightScale;
       const tightY = fullY * config.tightScale;
 
-      // ring → tight album stack (gather), then tight → full spread (expand).
-      const gatheredX = lerp(card.ringX, tightX, gatherT);
-      const gatheredY = lerp(card.ringY, tightY, gatherT);
+      // ─── Intro: vertical scatter → centred row → ring ────────────────────
+      // Matches the original DOM/CSS intro: each card sits in a SHUFFLED column
+      // (fixed X) at a random height, fades in on a random delay, then collapses
+      // straight DOWN (Y→0) into the centred row. Then it fans onto the ring —
+      // the bundle's `introProgress` onto the SAME cards the scroll takes off.
+      // At intro=1 the base position IS the ring position.
+      const introAppear = easePow1InOut(clamp01(intro / 0.5)); // Y collapse → row
+      const introToRing = easePow1InOut(clamp01((intro - 0.5) / 0.5)); // row → ring
+      const rowSlotW = Math.min(
+        cardWidth + 12,
+        (viewportWidth - 120) / Math.max(1, count - 1),
+      );
+      // Column X stays fixed through the appear (X never animates), exactly like
+      // the DOM collapse — only Y drops from the scattered height to the row.
+      const columnX = (card.introColumn - (count - 1) / 2) * rowSlotW;
+      const scatterY = card.scatterNY * viewportHeight * 0.42;
+      const appearedY = lerp(scatterY, 0, introAppear);
+      const baseX = lerp(columnX, card.ringX, introToRing);
+      const baseY = lerp(appearedY, card.ringY, introToRing);
+
+      // ring/base → tight album stack (gather), then tight → full spread.
+      const gatheredX = lerp(baseX, tightX, gatherT);
+      const gatheredY = lerp(baseY, tightY, gatherT);
       const targetX = lerp(gatheredX, fullX, spreadT);
       const targetY = lerp(gatheredY, fullY, spreadT);
 
       // Damped follow (example-2 `p.Damp`): crisp on the idle ring, trailing as
-      // the cards gather and spread.
+      // the cards gather and spread. Snapped on the first frame so the intro
+      // begins from the scattered layout rather than easing in from the origin.
       const dampRate = lerp(0.22, 0.06, Math.max(gatherT, spreadT));
-      card.pos.x = dampToward(card.pos.x, targetX, dampRate, deltaMs);
-      card.pos.y = dampToward(card.pos.y, targetY, dampRate, deltaMs);
-      card.pos.z = dampToward(card.pos.z, 0, dampRate, deltaMs);
+      if (needsPositionSnap) {
+        card.pos.x = targetX;
+        card.pos.y = targetY;
+        card.pos.z = 0;
+      } else {
+        card.pos.x = dampToward(card.pos.x, targetX, dampRate, deltaMs);
+        card.pos.y = dampToward(card.pos.y, targetY, dampRate, deltaMs);
+        card.pos.z = dampToward(card.pos.z, 0, dampRate, deltaMs);
+      }
       card.root.position.set(card.pos.x, card.pos.y, card.pos.z);
 
       // Square up the cards as they gather — no in-plane roll in the album/row
@@ -763,9 +825,9 @@ export function createRingScene({
       program.uniforms.uOpacity.value = 1;
       program.uniforms.uLight.value = 0;
 
-      // Intro stagger fade-in across the first 60% of the intro.
-      const introOffset = card.index / count;
-      const introLocal = clamp01((intro - introOffset * 0.4) / 0.6);
+      // Intro fade-in with a RANDOM per-card delay (matches the DOM intro's
+      // `stagger: { from: "random" }`) — cards pop in scattered, then collapse.
+      const introLocal = clamp01((intro - card.introDelayN * 0.35) / 0.4);
       program.uniforms.uLoadOpacity.value = introLocal;
 
       // Render order (painter's, no depth buffer): featured (deck slot 0) is the
@@ -773,6 +835,7 @@ export function createRingScene({
       // unchanged — example-2 doesn't reorder on hover.
       card.mesh.renderOrder = count - deckIndex;
     });
+    needsPositionSnap = false;
 
     // ─── Camera: perspective (ring) → orthographic (album + spread) ──────────
     // Orthographic once the album forms so every card renders the SAME size
