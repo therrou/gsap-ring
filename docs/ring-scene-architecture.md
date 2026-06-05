@@ -36,6 +36,10 @@ app/
 │   ├── ring-scene/
 │   │   ├── scene.ts          The whole WebGL scene: renderer, cameras, card
 │   │   │                     slabs, shaders, per-frame update(), picking, config.
+│   │   ├── indicator-wheel.ts iOS-alarm-style rotating word cylinder (net-new,
+│   │   │                     not in the bundle): in-scene WebGL, fixed
+│   │   │                     lower-center, spins to a random category word when a
+│   │   │                     spread card is hovered. Spring-driven settle.
 │   │   └── spring.ts         Critically-damped 1-D spring (matches test-3.js).
 │   ├── ring-stages.ts        PURE, tested math for zoom/stack/row + easings +
 │   │                         dampToward + projection-matrix mixing.
@@ -92,30 +96,33 @@ offsets go on `mesh`, so hover is always applied in the card's **local** frame.
 
 ---
 
-## 4. Card geometry, shader & the "album" slab
+## 4. Card geometry, shader & the frosted "slab"
 
-Each card is a thin **`Box`** (`cardWidth=75 × cardHeight=100 × CARD_THICKNESS=6`),
-not a flat plane — this gives real thickness (the album spine).
+Each card is a flat **`Plane`** (`cardWidth=75 × cardHeight=100`). It is **not** a
+3-D box — matching the bundle, the "album slab" look is faked by a **frosted-glass
+shader** (`uFrost`) plus card overlap and deck tilt once the cards gather, not by
+real thickness. On the idle ring + intro `uFrost = 0`, so the card reads as a
+clean plane.
 
-**Fragment shader** (`scene.ts` `FRAGMENT_SHADER`) decides per-face using the
-object-space normal (`vLocalNormal`):
+**Fragment shader** (`scene.ts` `FRAGMENT_SHADER`):
 
-- **Front/back faces** (`|normal.z| > 0.5`): sample the image texture, apply a
-  soft vignette, and mask a **rounded rectangle** via an SDF
-  (`sdRoundRect`, radius = `uCornerRadius` px). Fully-transparent corner pixels
-  `discard`.
-- **Side faces** (the thin edges): flat neutral **spine** colour `uEdgeColor`
-  (`CARD_EDGE_COLOR`).
+- Sample the image from the face position, apply a soft vignette, and mask a
+  **rounded rectangle** via an SDF (`sdRoundRect`, radius = `uCornerRadius` px).
+  Fully-transparent corner pixels `discard`.
+- **Frost** (ported from the bundle's `co`/`In` shader, ~L1502-1510), gated by
+  `uFrost ∈ [0,1]`: a procedural **value-noise** tint (`valueNoise`, no external
+  texture — the bundle's `00-frost` asset isn't in this repo), a soft edge-alpha
+  falloff, and **view-angle darkening** (`(1 − |vNormal.z|)·0.2·uFrost`) so a
+  tilted card reads a frosted "spine". `uFrost` is driven per frame by
+  `max(gatherT, flatRowT, spreadT)` — comes in as the deck forms, 0 before.
 
 **Render flags** on every card program:
 
 - `depthTest:false`, `depthWrite:false` → **painter's algorithm**; draw order is
   pure `renderOrder` (front card = highest order). This keeps every card the
-  **same size** (no depth buffer = no perspective size fighting) and avoids
-  coplanar z-fighting.
-- `cullFace: gl.BACK` → only camera-facing faces draw, so a thin slab renders
-  correctly without a depth buffer. (When the idle-ring hover flips a card ~180°,
-  its back face becomes front-facing and shows the mirrored image — intended.)
+  **same size** (no depth buffer = no perspective size fighting).
+- `cullFace: null` → both faces draw, so when the idle-ring hover flips a card
+  ~180° its (mirrored) back is still visible — intended.
 
 `uHasMap` flips 0→1 when each texture resolves (a fallback colour shows during
 load); `uLoadOpacity` drives the staggered intro fade-in.
@@ -124,30 +131,34 @@ load); `uLoadOpacity` drives the staggered intro fade-in.
 
 ## 5. Scroll → progress schedule
 
-`test.tsx` owns one **pinned** `ScrollTrigger` (`pin:true`, `scrub:0.6`,
-`end:+=SCROLL_LENGTH` = 2600px). On update it maps the pin progress `p∈[0,1]` into
-**three overlapping channels** via `mapProgress(p, start, end)`:
+`ring-experience.tsx` owns one **pinned** `ScrollTrigger` (`pin:true`,
+`scrub:0.6`, `end:+=SCROLL_LENGTH` = 3200px). On update it maps the pin progress
+`p∈[0,1]` into **four overlapping channels** via `mapProgress(p, start, end)`:
 
-| Channel | Range (p)            | Drives                                   |
-|---------|----------------------|------------------------------------------|
-| `zoom`  | `0 → ZOOM_END` (0.45)| ring scale + featured centring + ortho   |
-| `stack` | `0.4 → 0.7`          | gather into the tight album, deck tilt    |
-| `iso`   | `0.65 → 1.0`         | expand + spread to the final diagonal row |
+| Channel | Range (p)        | Drives                                        |
+|---------|------------------|-----------------------------------------------|
+| `zoom`  | `0 → 0.40`       | ring scale + featured centring + side splay/fade + ortho |
+| `stack` | `0.35 → 0.58`    | gather into the tight album behind featured   |
+| `row`   | `0.54 → 0.78`    | tight album → flat horizontal fronto-parallel row |
+| `iso`   | `0.74 → 1.0`     | flat row → final diagonal slab spread + deck tilt |
 
 These thresholds are **reconstructed** (the bundle computes its own
 `part1/part2/scrub/part4` schedule in a store not present in this repo) and are
 intentionally easy to retune.
 
 A separate **intro** tween animates `intro: 0→1` over 1.6s on mount (staggered
-card load-fade + the hover "wake" gate). `prefers-reduced-motion` skips the
-ScrollTrigger and ScrollSmoother entirely (snap to idle ring).
+card load-fade + the hover "wake" gate). The Scene tuner also exposes an **Intro**
+slider that scrubs this 0→1 directly (it kills the auto tween).
+`prefers-reduced-motion` skips the ScrollTrigger and ScrollSmoother entirely
+(snap to idle ring).
 
 Inside `scene.update()` the raw channels are passed through easings:
 
 ```
 zoomEase  = easeOutCubic(zoom)
-gatherT   = stackEase = easeOutCubic(stack)   // ring → tight album
-spreadT   = rowEase   = easePow1InOut(iso)    // tight album → full spread
+gatherT   = easeOutCubic(stack)     // ring → tight album
+flatRowT  = easePow1InOut(row)      // tight album → flat horizontal row
+spreadT   = easePow1InOut(iso)      // flat row → diagonal spread
 ```
 
 ---
@@ -194,33 +205,50 @@ gatheredY = lerp(card.ringY, tightY, gatherT)
   stack); the rest follow in index order — matching the bundle's
   `r = [featured, …]`. Featured therefore anchors the front of both the album and
   the final diagonal, instead of sitting in the middle.
-- Cards **do not fade out** — they stay visible and converge into the album behind
-  featured. The album is just the diagonal arrangement scaled to `tightScale`.
-- `card.root.rotation.z` flattens the ring's tangent roll to **0** as cards gather
-  (cards are square rectangles; the album tilt comes from the deck, not a skew).
-- **Deck tilt:** `containerRoot.rotation.x = containerLeanXDeg`, `.y = spineTiltDeg`
-  (scaled by `max(gatherT, spreadT)`) — a small Y-turn reveals the slab spines.
+- **Side splay + fade** (Image #10): as the ring collapses, non-featured cards
+  splay outward and dip opacity, strongest for cards furthest from featured around
+  the ring. Driven by a dispersion **hump** `disperse = sin(π·gatherT)` (0 at the
+  ends, peak mid-gather): `splayX = sign(sNorm)·disperse·splayAmount/zoomScale`,
+  `uOpacity = 1 − disperse·splayFade·|sNorm|`, where `sNorm =
+  shortestAngleDelta(ringAngle, featuredAngle)/π`. By `gatherT=1` the splay/fade
+  is gone and every card settles into the album at full opacity — a single-set
+  stand-in for the bundle's ring→deck hand-off (it uses two card sets; §13).
+- `card.root.rotation.z` flattens the ring's tangent roll to **0** as cards gather.
 
-### 6.4 Expand + spread (`iso: 0 → 1`)
+### 6.4 Flat horizontal row (`row: 0 → 1`) — Image #11
+The intermediate beat between the tight album and the diagonal. `computeFlatRowTarget`
+puts cards on a single **horizontal** line, fronto-parallel (`y=0`), each stepped
+back a small `z` by deck order (ortho → overlap order, not size):
 ```
-targetX = lerp(gatheredX, fullX, spreadT)
-targetY = lerp(gatheredY, fullY, spreadT)
-targetZ = 0     // ALL cards coplanar → identical size under orthographic camera
+flat   = computeFlatRowTarget(deckIndex, count, cardStep, depthStep)  // px
+rowedX = lerp(gatheredX, flat.x/zoomScale, flatRowT)
+rowedY = lerp(gatheredY, flat.y/zoomScale, flatRowT)
+rowedZ = lerp(0,         flat.z/zoomScale, flatRowT)
+```
+**Deck tilt** (`containerLeanXDeg`, `spineTiltDeg`) ramps on `max(flatRowT, spreadT)`
+so the frosted "spines" reveal here and hold through the spread — not on the tight
+album.
+
+### 6.5 Diagonal spread (`iso: 0 → 1`) — Image #12
+```
+targetX = lerp(rowedX, fullX, spreadT) + splayX
+targetY = lerp(rowedY, fullY, spreadT)
+targetZ = lerp(rowedZ, 0,     spreadT)   // coplanar → identical size under ortho
 ```
 `computeRowTarget` spreads cards evenly along the diagonal from lower-left to
 upper-right, filling the viewport minus a margin (`rowMarginFactor`). The whole
 ring scale also **pulls back** (`rowScalePullback`) so the spread isn't huge.
 
-### 6.5 Row hover (`iso > 0.5`)
+### 6.6 Row hover (`iso > 0.5`)
 The spread cards are hoverable again — see [§7.2](#72-row-hover-peek).
 
-### 6.6 Damped follow
+### 6.7 Damped follow
 The final `targetX/Y/Z` is not applied directly; each card's `pos` is eased toward
 it with `dampToward(pos, target, dampRate, dtMs)` (the bundle's `p.Damp` analog),
 `dampRate` ramping from crisp (idle ring) to trailing (gather/spread). This gives
 the deck its fluid, slightly-lagging motion.
 
-### 6.7 Render order
+### 6.8 Render order
 `card.mesh.renderOrder = count − deckIndex` (painter's): featured (slot 0) draws on
 top, the rest step back by deck order. **Hover does not change render order**
 (matches the bundle).
@@ -257,19 +285,25 @@ forwardZ   = computeCardPlaneForwardZ(G,zoom)    // 160·G·(1 − pow1out(zoom)
 ## 8. Picking (which card is hovered)
 
 `scene.pickAt(clientX, clientY)` is screen-space:
-1. project each card's world centre to screen (perspective focal projection);
-2. test the cursor against the card's projected rect, sized using the card's
-   **world scale** pulled from its world matrix (so the hit-rect tracks the real
-   on-screen size at any zoom);
+1. project each card's four **mesh-local corners** through the camera's live
+   `projectionViewMatrix` (`projectLocal`) — so the hit-area matches whatever is
+   actually drawn, **perspective OR orthographic**, and tracks tilt/rotation;
+2. test the cursor against the resulting convex **quad** (`pointInQuad`), not an
+   axis-aligned rect — accurate for the rotated cards in the diagonal spread;
 3. among all cards under the cursor, return the **frontmost** (highest
    `renderOrder`) — deterministic, matches what's drawn on top, no flicker.
 
-`test.tsx` only calls `pickAt` when `iso > 0.5` (the spread row); the result is
-fed back via `setHoveredIndex`.
+`ring-experience.tsx` only calls `pickAt` when `iso > 0.5` (the spread row); the
+result is fed back via `setHoveredIndex`.
+
+**Debug labels:** `scene.getCardScreenPositions()` projects each card centre the
+same way; the tuner's "Card numbers" toggle renders a number badge per card
+(positioned imperatively each frame in a fixed overlay) so you can identify cards
+by index when describing an arrangement.
 
 > If you need pixel-perfect picking on overlapping rotated slabs, swap this for
-> OGL's `Raycast` extra against the card meshes. Screen-space is enough for the
-> current spread.
+> OGL's `Raycast` extra against the card meshes. The projected-quad test is enough
+> for the current spread.
 
 ---
 
@@ -306,29 +340,40 @@ for Lenis-style inertial scroll. Key points:
 
 ## 11. Tuning recipes
 
-The fastest path is the in-app **Scene tuner** (top-right on `/test`): a **Scrub**
-slider parks the sequence on any phase, and live sliders push to
-`controller.setConfig(...)`. Values map to `RingSceneConfig`:
+The fastest path is the in-app **Scene tuner** (top-right on `/test`): an **Intro**
+slider scrubs the on-mount intro, a **Scrub** slider parks the scroll sequence on
+any phase, and live sliders push to `controller.setConfig(...)`. Values map to
+`RingSceneConfig`:
 
 | Slider          | Config field        | Effect |
 |-----------------|---------------------|--------|
 | Zoom scale      | `zoomScaleMax`      | how big the featured card gets at full zoom |
 | Spread scale    | `rowScalePullback`  | card size in the final spread |
 | Spread length   | `rowMarginFactor`   | diagonal length / overlap (smaller = longer, less overlap) |
-| Album tightness | `tightScale`        | gap of the tight album stack (Image-8 moment) |
-| Spine tilt °    | `spineTiltDeg`      | deck Y-turn that reveals slab spines |
+| Album tightness | `tightScale`        | gap of the tight album stack |
+| Spine tilt °    | `spineTiltDeg`      | deck Y-turn that reveals frosted spines |
 | Deck lean °     | `containerLeanXDeg` | deck forward lean |
 | Ring tilt °     | `baseTiltXDeg`      | idle-ring X tilt (top-of-ring toward camera) |
 | Corner radius   | `cornerRadius`      | card corner rounding (px) |
 | Hover slide     | `hoverSlide`        | row-hover sideways peek distance |
+| Side splay      | `splayAmount`       | lateral splay of side cards on collapse (Image #10) |
+| Side fade       | `splayFade`         | opacity dip of side cards on collapse |
+| Reappear start  | `reappearStart`     | `row`-channel point where faded-out sides fade back in behind featured (delays it → clean "featured alone" beat) |
+| Slab border px  | `borderWidth`       | faux-slab inner border stroke width (shader) |
+| Slab edge       | `slabEdge`          | painted side-edge darkening that fakes slab thickness on the tilted deck |
+| Stack gap tight | `stackGapTight`     | album spacing multiplier at the start of the gather |
+| Stack gap open  | `stackGapOpen`      | album spacing once the deck/row forms (gap opens, Image #23) |
 
 **Common deeper tweaks (code):**
 
-- **Stage timing / overlap** → `ZOOM_END`, `STACK_START/END`, `ISO_START/END` and
-  `SCROLL_LENGTH` in `test.tsx`.
-- **Card size / aspect / thickness** → `cardWidth`, `cardHeight`, `CARD_THICKNESS`
-  in `scene.ts` (geometry is built once; not a live-config field).
-- **Spine colour** → `CARD_EDGE_COLOR`. **Clear colour** → `RING_CLEAR_COLOR`.
+- **Stage timing / overlap** → `ZOOM_END`, `STACK_START/END`, `ROW_START/END`,
+  `ISO_START/END` and `SCROLL_LENGTH` in `ring-experience.tsx`.
+- **Card size / aspect** → `cardWidth`, `cardHeight` in `scene.ts` (geometry is
+  built once; not a live-config field).
+- **Frost strength / look** → the `uFrost` lines in `FRAGMENT_SHADER`.
+- **Flat-row spacing** → `FLAT_ROW_CARD_STEP`, `FLAT_ROW_DEPTH_STEP`.
+- **Intro grid** → `INTRO_GRID_ROWS` and the `scatterY`/`columnX` calc in `update()`.
+- **Clear colour** → `RING_CLEAR_COLOR`.
 - **Card count / which card is featured** → `RING_CARD_COUNT`, `RING_FEATURED_INDEX`.
 - **Idle-hover strength/curves** → `ring-parity.ts`
   (`computeCardPlaneInfluence/FaceRotation/ForwardZ`, `RING_CARD_PLANE_FORWARD`).
@@ -336,7 +381,8 @@ slider parks the sequence on any phase, and live sliders push to
 - **Smooth-scroll feel** → `smooth` (ScrollSmoother) and `scrub` (ScrollTrigger).
 
 When adding a new tunable: add the field to `RingSceneConfig` + `DEFAULT_RING_CONFIG`,
-read `config.x` in `update()`, and add a row to `DEBUG_SLIDERS` in `test.tsx`.
+read `config.x` in `update()`, and add a row to `DEBUG_SLIDERS` in
+`ring-experience.tsx`.
 
 ---
 
@@ -346,7 +392,7 @@ read `config.x` in `update()`, and add a row to `DEBUG_SLIDERS` in `test.tsx`.
 `easeBezierInOut`, `easePower2Out`, `easePow1InOut`, `easeExpoIn`,
 `orthographicBlendT`, `wrapToPi`, `computeZoomScale`, `computeZoomLift`,
 `computeFeaturedCenterRotation`, `computeContainerTilt`, `computeNonFeaturedOpacity`,
-`computeRowTarget`, `dampToward`, `mixProjectionMatrices`.
+`computeRowTarget`, `computeFlatRowTarget`, `dampToward`, `mixProjectionMatrices`.
 *(Some — `computeZoomLift`, `computeContainerTilt`, `computeNonFeaturedOpacity` —
 are tested and available but not currently wired into `scene.ts` after the
 album/same-size rework; they remain for reference and re-use.)*
@@ -368,16 +414,25 @@ Run a single file fast: `npx vitest run app/lib/ring-stages.test.ts`. (The full
 
 **Faithful ports:** the idle-ring hover (`Ar`) math and curves; the row-hover
 spring (`positionHover`, stiffness 130, target 2, local +X); the spring integrator
-(`test-3.js`); the perspective↔orthographic blend concept; the slab card with
-front/back image + neutral spine; featured-as-front-of-deck ordering; damped deck
-follow (`p.Damp`).
+(`test-3.js`); the perspective↔orthographic blend concept; the flat **`Plane`**
+card with the **frosted-glass** overlay; the grid intro (`gridConfig`,
+grid→row→ring); featured-as-front-of-deck ordering; damped deck follow (`p.Damp`).
+
+**Faithful (added later):** the **two card sets** — a ring set (`cards`) that
+fades out + swings its ±6 featured-neighbours ±π/2 (bundle `G.opacity`,
+L3595-3606), and a separate **deck set** (`deckCards` under `deckRoot`) that
+fades in and does stack→row→diagonal with the **main** card born at screen-centre
+(bundle `PlaneStacked` `r[0]`). This makes the centred card genuinely immovable
+through the hand-off (the deck-main rotates in place to reveal the slab). Picking
+targets the deck set.
 
 **Reconstructed / adapted** (bundle source not in repo, or coordinate-frame
 differences): the exact scroll→progress schedule and thresholds; the bundle's
-custom `bezier.inOut*` eases (replaced with cubic in-out); the absolute hover-slide
-magnitude (`hoverSlide` is calibrated, the bundle's `2` is in its own card-scale
-units); the vertical-ring simplification of the bundle's horizontal-ring +
-container-rotation construction.
+custom `bezier.inOut*` eases (replaced with cubic in-out); the **procedural
+frost** noise (the bundle's `00-frost` texture isn't in this repo); the absolute
+hover-slide / spacing magnitudes; the vertical-ring simplification of the bundle's
+horizontal-ring + container-rotation construction; the deck tilt pivots on
+screen-centre (global) rather than per-card as the bundle does.
 
 **Out of scope** (present in the bundle, intentionally not built): the cube
 formation + two-tone logo "portal" composite, the FXAA post-pass, the Rapier

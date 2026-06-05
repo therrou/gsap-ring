@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   computeContainerTilt,
   computeFeaturedCenterRotation,
+  computeFlatRowTarget,
   computeNonFeaturedOpacity,
   computeRowTarget,
   computeZoomLift,
@@ -122,6 +123,31 @@ describe("stage 3 row", () => {
     const mid = computeRowTarget({ index: 11, part4: 1, ...base });
     expect(mid.x).toBeCloseTo(0, 0);
     expect(mid.y).toBeCloseTo(0, 0);
+  });
+});
+
+describe("stage 3b flat row", () => {
+  const base = { count: 23, cardStep: 40, depthStep: 4 };
+
+  it("is fronto-parallel (y = 0) for every card", () => {
+    expect(computeFlatRowTarget({ index: 0, ...base }).y).toBe(0);
+    expect(computeFlatRowTarget({ index: 22, ...base }).y).toBe(0);
+  });
+
+  it("spreads cards monotonically and symmetrically in x", () => {
+    const first = computeFlatRowTarget({ index: 0, ...base });
+    const last = computeFlatRowTarget({ index: 22, ...base });
+    const mid = computeFlatRowTarget({ index: 11, ...base });
+    expect(first.x).toBeLessThan(mid.x);
+    expect(mid.x).toBeLessThan(last.x);
+    expect(mid.x).toBeCloseTo(0, 8); // 23 cards → centre index 11
+    expect(first.x).toBeCloseTo(-last.x, 8);
+  });
+
+  it("steps z back by deck order", () => {
+    expect(computeFlatRowTarget({ index: 0, ...base }).z).toBeCloseTo(0, 8);
+    expect(computeFlatRowTarget({ index: 1, ...base }).z).toBe(-base.depthStep);
+    expect(computeFlatRowTarget({ index: 5, ...base }).z).toBe(-5 * base.depthStep);
   });
 });
 

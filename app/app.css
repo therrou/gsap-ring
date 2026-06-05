@@ -236,6 +236,66 @@ body {
   touch-action: none;
 }
 
+/* ── Lightbox (click a spread card → near-fullscreen image) ───────────────── */
+.ring-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.ring-lightbox-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(246, 248, 250, 0.82);
+  backdrop-filter: blur(18px) saturate(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
+}
+
+.ring-lightbox-frame {
+  position: fixed;
+  overflow: hidden;
+  background: #eef1f5;
+  box-shadow:
+    0 2px 8px rgba(20, 24, 34, 0.08),
+    0 40px 120px rgba(20, 24, 34, 0.28);
+  will-change: left, top, width, height, border-radius;
+  z-index: 1;
+}
+
+.ring-lightbox-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.ring-lightbox-close {
+  position: fixed;
+  top: 24px;
+  right: 28px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(20, 24, 34, 0.06);
+  color: #14181f;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+
+.ring-lightbox-close:hover {
+  background: rgba(20, 24, 34, 0.14);
+  transform: rotate(90deg);
+}
+
 .ogl-ring-hero-text {
   position: absolute;
   left: 50%;
@@ -468,6 +528,36 @@ body {
   width: 100%;
   accent-color: #2b6cff;
 }
+.ring-debug-row select {
+  width: 100%;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.25rem;
+  border-radius: 6px;
+  border: 1px solid rgba(36, 40, 49, 0.2);
+  background: #fff;
+  color: #1f2430;
+}
+.ring-debug-replay {
+  padding: 0.35rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(43, 108, 255, 0.4);
+  background: rgba(43, 108, 255, 0.12);
+  color: #1740b8;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ring-debug-replay:hover {
+  background: rgba(43, 108, 255, 0.2);
+}
+.ring-debug-section {
+  margin-top: 0.25rem;
+  font-weight: 600;
+  font-size: 0.7rem;
+  opacity: 0.7;
+  border-top: 1px solid rgba(36, 40, 49, 0.14);
+  padding-top: 0.4rem;
+}
 .ring-debug-toggle {
   position: fixed;
   top: 12px;
@@ -479,4 +569,78 @@ body {
   background: rgba(248, 249, 252, 0.92);
   font-size: 0.72rem;
   cursor: pointer;
+}
+.ring-debug-check {
+  grid-auto-flow: column;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Live "current step" readout. */
+.ring-debug-status {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  border-radius: 8px;
+  background: rgba(43, 108, 255, 0.08);
+  border: 1px solid rgba(43, 108, 255, 0.18);
+}
+.ring-status-phase {
+  font-weight: 600;
+  font-size: 0.74rem;
+  color: #1740b8;
+}
+.ring-status-row {
+  display: grid;
+  grid-template-columns: 3.6rem 1fr 2.2rem;
+  align-items: center;
+  gap: 0.35rem;
+  opacity: 0.6;
+}
+.ring-status-row.is-active {
+  opacity: 1;
+}
+.ring-status-label {
+  font-variant-numeric: tabular-nums;
+}
+.ring-status-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(36, 40, 49, 0.14);
+  overflow: hidden;
+}
+.ring-status-fill {
+  height: 100%;
+  width: 0;
+  background: #2b6cff;
+}
+.ring-status-row.is-active .ring-status-fill {
+  background: #ff7a1a;
+}
+.ring-status-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+/* Debug card-number labels overlay (positioned imperatively per frame). */
+.ring-card-labels {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  pointer-events: none;
+}
+.ring-card-label {
+  position: fixed;
+  top: 0;
+  left: 0;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: rgba(20, 24, 33, 0.82);
+  color: #fff;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  will-change: transform;
 }

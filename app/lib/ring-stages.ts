@@ -135,6 +135,34 @@ export function computeRowTarget(input: {
   return { x, y, t: easePow1InOut(part4) };
 }
 
+// ─── Stage 3b: flat row (PlaneStacked deck `E`) ───────────────────────────────
+
+/**
+ * Flat horizontal row target, in viewport pixels. The intermediate beat between
+ * the tight album and the diagonal spread (reference Image #11 / bundle `E`,
+ * ~3120-3130): cards fan out along a single horizontal line, fronto-parallel
+ * (`y = 0`), each stepped back a little in `z` by deck order so the stack still
+ * reads. Under the orthographic camera the `z` step changes overlap/order, not
+ * size, so every card stays the same size.
+ *
+ * `cardStep` is the horizontal gap between adjacent cards (px); `depthStep` is
+ * the per-card z recession (px, small). The row is centred on screen.
+ */
+export function computeFlatRowTarget(input: {
+  index: number;
+  count: number;
+  cardStep: number;
+  depthStep: number;
+}) {
+  const { index, count, cardStep, depthStep } = input;
+  const centre = (count - 1) / 2;
+  return {
+    x: (index - centre) * cardStep,
+    y: 0,
+    z: -index * depthStep,
+  };
+}
+
 // ─── Per-frame helpers ────────────────────────────────────────────────────────
 
 /**
