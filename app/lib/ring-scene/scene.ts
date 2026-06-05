@@ -27,6 +27,7 @@ import {
   type OGLRenderingContext,
 } from "ogl";
 import { Spring } from "./spring";
+import { createGlassPass } from "./glass-pass";
 // Indicator wheel (number + text) disabled in the spread — replaced by a
 // click-to-open lightbox. Kept here (commented) so it's easy to restore.
 // import { createIndicatorWheel } from "./indicator-wheel";
@@ -130,6 +131,14 @@ export type RingSceneConfig = {
   stackGapTight: number;
   /** Album spacing multiplier once the deck/row forms (gap opened, Image #23). */
   stackGapOpen: number;
+  /** Liquid-glass edge window: clear centre half-width (0..1). */
+  glassCenter: number;
+  /** Liquid-glass edge refraction strength (UV units at the edge). */
+  glassStrength: number;
+  /** Liquid-glass rim glow intensity. */
+  glassRim: number;
+  /** Liquid-glass rim colour (linear rgb). */
+  glassRimColor: [number, number, number];
 };
 
 export const DEFAULT_RING_CONFIG: RingSceneConfig = {
@@ -155,6 +164,10 @@ export const DEFAULT_RING_CONFIG: RingSceneConfig = {
   slabEdge: 0.6,
   stackGapTight: 1.0,
   stackGapOpen: 2.2,
+  glassCenter: 0.5,
+  glassStrength: 0.08,
+  glassRim: 0.6,
+  glassRimColor: [0.6, 0.8, 1.0],
 };
 /**
  * Row hover, ported from example-2 `PlaneStacked` (positionHover): a critically
@@ -656,6 +669,9 @@ export function createRingScene({
   // const wheel = createIndicatorWheel(gl, { parent: scene, words: INDICATOR_WORDS });
   // let indicatorCard = -1;
 
+  // Liquid-glass edge window — a post pass used only during the flat-row stop.
+  const glass = createGlassPass(gl, renderer);
+
   const progressState: RingSceneProgress = { zoom: 0, stack: 0, row: 0, iso: 0, intro: 0 };
   const config: RingSceneConfig = { ...DEFAULT_RING_CONFIG };
   const pointer: RingPointerState = { x: 0, y: 0, inside: false };
@@ -721,6 +737,7 @@ export function createRingScene({
     renderer.setSize(width, height);
     configureCamera(width, height);
     layoutCardsBase();
+    glass.setSize(width, height);
     // wheel.layout(width, height);
   }
 
@@ -1240,7 +1257,21 @@ export function createRingScene({
     // } else { indicatorCard = -1; }
     // wheel.update(deltaMs);
 
-    renderer.render({ scene, camera });
+    // ─── Liquid-glass edge window (flat-row stop only) ───────────────────────
+    // Ramps in over the flat row, fades out as the diagonal spread begins. When
+    // off we render straight to screen (no extra pass).
+    const glassT = flatRowT * (1 - spreadT);
+    if (glassT > 0.001) {
+      glass.renderToTarget(scene, camera);
+      glass.renderGlass(glassT, {
+        center: config.glassCenter,
+        strength: config.glassStrength,
+        rim: config.glassRim,
+        rimColor: config.glassRimColor,
+      });
+    } else {
+      renderer.render({ scene, camera });
+    }
   }
 
   function destroy() {
@@ -1255,9 +1286,14 @@ export function createRingScene({
     deckCards.forEach((dc) => {
       gl.deleteProgram(dc.mesh.program.program);
     });
+    glass.destroy();
     // wheel.destroy();
-    const loseContext = gl.getExtension("WEBGL_lose_context");
-    loseContext?.loseContext();
+    // NOTE: do NOT call WEBGL_lose_context.loseContext() here. The <canvas> is a
+    // persistent DOM node reused across React 19 StrictMode's mount→unmount→mount
+    // dev cycle (and any future remount). Force-losing the context kills it for
+    // the next createRingScene on the SAME canvas, so every program then fails to
+    // link (uniformLocations undefined → Program.use forEach crash). On a real
+    // unmount the canvas is removed and its GL context is reclaimed by the GC.
   }
 
   // Initial layout pass before the first scroll/pointer event.
