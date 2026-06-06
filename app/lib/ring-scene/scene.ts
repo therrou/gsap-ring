@@ -131,14 +131,24 @@ export type RingSceneConfig = {
   stackGapTight: number;
   /** Album spacing multiplier once the deck/row forms (gap opened, Image #23). */
   stackGapOpen: number;
-  /** Liquid-glass edge window: clear centre half-width (0..1). */
+  /** Liquid-glass panel half-width, fraction of viewport (0..0.5). */
+  glassHalfW: number;
+  /** Liquid-glass panel half-height, fraction of viewport (0..0.5). */
+  glassHalfH: number;
+  /** Liquid-glass panel corner radius, px. */
+  glassRadius: number;
+  /** Clear centre half-width within the panel (0..1). */
   glassCenter: number;
-  /** Liquid-glass edge refraction strength (UV units at the edge). */
+  /** Liquid-glass horizontal cylinder compression at the edge. */
   glassStrength: number;
-  /** Liquid-glass rim glow intensity. */
+  /** Liquid-glass vertical bow (cylinder wrap of the side slides). */
+  glassBow: number;
+  /** Liquid-glass specular streak intensity. */
   glassRim: number;
   /** Liquid-glass rim colour (linear rgb). */
   glassRimColor: [number, number, number];
+  /** How far the glass panel glides toward the cursor (fraction of half-view). */
+  glassFollow: number;
 };
 
 export const DEFAULT_RING_CONFIG: RingSceneConfig = {
@@ -164,10 +174,15 @@ export const DEFAULT_RING_CONFIG: RingSceneConfig = {
   slabEdge: 0.6,
   stackGapTight: 1.0,
   stackGapOpen: 2.2,
+  glassHalfW: 0.38,
+  glassHalfH: 0.3,
+  glassRadius: 18,
   glassCenter: 0.5,
-  glassStrength: 0.08,
-  glassRim: 0.6,
+  glassStrength: 0.12,
+  glassBow: 0.6,
+  glassRim: 0.8,
   glassRimColor: [0.6, 0.8, 1.0],
+  glassFollow: 0.1,
 };
 /**
  * Row hover, ported from example-2 `PlaneStacked` (positionHover): a critically
@@ -1262,13 +1277,27 @@ export function createRingScene({
     // off we render straight to screen (no extra pass).
     const glassT = flatRowT * (1 - spreadT);
     if (glassT > 0.001) {
+      // Same damped pointer the ring uses → consistent "lean toward cursor" feel.
+      // Normalize to -1..1 and flip Y to screen-down for the shader.
+      const glassPointerX = Math.max(-1, Math.min(1, pointerDamp.x / Math.max(1, viewportWidth * 0.5)));
+      const glassPointerY = Math.max(-1, Math.min(1, -pointerDamp.y / Math.max(1, viewportHeight * 0.5)));
       glass.renderToTarget(scene, camera);
-      glass.renderGlass(glassT, {
-        center: config.glassCenter,
-        strength: config.glassStrength,
-        rim: config.glassRim,
-        rimColor: config.glassRimColor,
-      });
+      glass.renderGlass(
+        glassT,
+        {
+          halfW: config.glassHalfW,
+          halfH: config.glassHalfH,
+          radius: config.glassRadius,
+          center: config.glassCenter,
+          strength: config.glassStrength,
+          bow: config.glassBow,
+          rim: config.glassRim,
+          rimColor: config.glassRimColor,
+          follow: config.glassFollow,
+        },
+        glassPointerX,
+        glassPointerY,
+      );
     } else {
       renderer.render({ scene, camera });
     }

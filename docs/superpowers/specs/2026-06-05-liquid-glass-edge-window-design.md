@@ -1,5 +1,24 @@
 # Liquid-Glass Edge Window (flat-row stop)
 
+## Revision (2026-06-06) — bounded panel, not full viewport
+
+Changed from a full-screen edge effect to a **centred, card-like glass panel**
+drawn on top of the canvas:
+- Panel is a rounded rect bounded in **both** width and height (`glassHalfW`,
+  `glassHalfH` fractions of viewport; `glassRadius` px corners). Outside the
+  panel = untouched canvas.
+- Inside: only the panel's **L/R edges** refract (`glassCenter` keeps the middle
+  clear); a **rim** traces the rounded border (card look).
+- Shader works in px (`uResolution`) for isotropic round corners; SDF rounded
+  rect → `mask`; refraction is panel-relative (`dx = p.x / panelHalfW`).
+- New config: `glassHalfW` (0.38), `glassHalfH` (0.3), `glassRadius` (18) +
+  the existing `glassCenter/Strength/Rim/RimColor`. Three new tuner sliders.
+
+Original full-viewport design retained below for reference.
+
+---
+
+
 Date: 2026-06-05
 Scope: new `app/lib/ring-scene/glass-pass.ts`, wiring in
 `app/lib/ring-scene/scene.ts`, sliders in `app/components/ring-experience.tsx`.
