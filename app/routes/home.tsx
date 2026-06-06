@@ -3,11 +3,11 @@ import { RingExperience } from "../components/ring-experience";
 
 export function meta({}: Route.MetaArgs) {
   return [
-    { title: "Image Ring" },
+    { title: "Image Ring + GSAP" },
     {
       name: "description",
       content:
-        "Cards appear, gather to centre, and assemble into an interactive image ring that zooms, stacks into an album, and spreads.",
+        ".",
     },
   ];
 }

@@ -3,11 +3,11 @@ import { RingExperience } from "../components/ring-experience";
 
 export function meta({}: Route.MetaArgs) {
   return [
-    { title: "OGL Image Ring" },
+    { title: "Debugger" },
     {
       name: "description",
       content:
-        "High-fidelity WebGL replication of the example-2 image-ring flow: intro, ring, zoom, album, spread.",
+        "debugger test page.",
     },
   ];
 }
