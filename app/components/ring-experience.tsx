@@ -163,6 +163,9 @@ export function RingExperience({ showTuner = false }: RingExperienceProps) {
   const [debugScrub, setDebugScrub] = useState(0);
   const [debugIntro, setDebugIntro] = useState(1);
   const [showDebug, setShowDebug] = useState(showTuner);
+  // Liquid-glass lens toggle (top-left button). Off by default; pushed to the
+  // scene whenever it changes (the scene defaults to off too).
+  const [glassEnabled, setGlassEnabled] = useState(false);
   const [showLabels, setShowLabels] = useState(showTuner);
   const labelsRef = useRef<HTMLDivElement | null>(null);
   const statusRef = useRef<HTMLDivElement | null>(null);
@@ -449,6 +452,12 @@ export function RingExperience({ showTuner = false }: RingExperienceProps) {
     };
   }, []);
 
+  // Push the glass toggle to the scene whenever it changes (scene is created in
+  // the mount effect above, which runs first, so sceneRef is set by now).
+  useEffect(() => {
+    sceneRef.current?.setGlassEnabled(glassEnabled);
+  }, [glassEnabled]);
+
   function updateConfig(key: keyof RingSceneConfig, value: number) {
     setDebugConfig((prev) => ({ ...prev, [key]: value }));
     sceneRef.current?.setConfig({ [key]: value });
@@ -477,6 +486,16 @@ export function RingExperience({ showTuner = false }: RingExperienceProps) {
 
   return (
     <>
+      <button
+        type="button"
+        className={`glass-toggle${glassEnabled ? " is-on" : ""}`}
+        aria-pressed={glassEnabled}
+        onClick={() => setGlassEnabled((on) => !on)}
+      >
+        <span className="glass-toggle-dot" aria-hidden="true" />
+        Liquid glass {glassEnabled ? "on" : "off"}
+      </button>
+
       {showTuner &&
         (showDebug ? (
           <div className="ring-debug">

@@ -411,6 +411,8 @@ export type RingSceneController = {
   } | null;
   update: (deltaMs: number) => void;
   setConfig: (partial: Partial<RingSceneConfig>) => void;
+  /** Toggle the liquid-glass lens on/off at runtime (off by default). */
+  setGlassEnabled: (enabled: boolean) => void;
   getConfig: () => RingSceneConfig;
   destroy: () => void;
   getFeaturedIndex: () => number;
@@ -698,8 +700,10 @@ export function createRingScene({
   // const wheel = createIndicatorWheel(gl, { parent: scene, words: INDICATOR_WORDS });
   // let indicatorCard = -1;
 
-  // Liquid-glass edge window — a post pass used only during the flat-row stop.
+  // Liquid-glass edge window — a post pass shown across every scene. Off by
+  // default; toggled at runtime via `setGlassEnabled` (top-left UI button).
   const glass = createGlassPass(gl, renderer);
+  let glassEnabled = false;
 
   const progressState: RingSceneProgress = { zoom: 0, stack: 0, row: 0, iso: 0, intro: 0 };
   const config: RingSceneConfig = { ...DEFAULT_RING_CONFIG, cornerRadius: cardCornerRadius };
@@ -1298,10 +1302,15 @@ export function createRingScene({
     // } else { indicatorCard = -1; }
     // wheel.update(deltaMs);
 
-    // ─── Liquid-glass edge window (flat-row stop only) ───────────────────────
-    // Ramps in over the flat row, fades out as the diagonal spread begins. When
-    // off we render straight to screen (no extra pass).
-    const glassT = flatRowT * (1 - spreadT);
+    // ─── Liquid-glass edge window (present in every scene) ───────────────────
+    // Now visible across the whole experience — intro, ring, zoom, stack, row —
+    // and only removed once the diagonal spread COMPLETES. It eases in smoothly
+    // as the scene starts (off the intro progress, double-eased so there's no
+    // pop) and is held fully on until the spread is nearly done, then eased out
+    // over its final stretch. When off we render straight to screen (no pass).
+    const glassAppear = easePow1InOut(intro);
+    const glassRemove = easePow1InOut(clamp01((iso - 0.65) / 0.35));
+    const glassT = glassEnabled ? glassAppear * (1 - glassRemove) : 0;
     if (glassT > 0.001) {
       // Same damped pointer the ring uses → consistent "lean toward cursor" feel.
       // Normalize to -1..1 and flip Y to screen-down for the shader.
@@ -1368,6 +1377,9 @@ export function createRingScene({
     getCardScreenRect,
     update,
     setConfig,
+    setGlassEnabled: (enabled: boolean) => {
+      glassEnabled = enabled;
+    },
     getConfig,
     destroy,
     getFeaturedIndex: () => featuredIndex,
