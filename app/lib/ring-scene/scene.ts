@@ -530,8 +530,22 @@ export function createRingScene({
    * frame. The smaller footprint also keeps top-row cards clear of the top nav
    * on standard 800px-tall windows.
    */
-  const cardWidth = 75;
-  const cardHeight = 100;
+  // Desktop footprint. On narrow viewports the ring radius is clamped to fit the
+  // screen, so 23 full-size cards fuse into a gapless donut — shrink the card to
+  // keep a clear gap between neighbours (the arc per card scales with radius, the
+  // card must scale with it). Aspect (~0.75) is preserved. Card size is fixed at
+  // creation (geometry is built once); the radius below adapts on resize.
+  // Use the viewport width (not canvas.clientWidth — that can be 0 / pre-layout
+  // at creation, which wrongly shrank desktop cards). Desktop ≥1024 → full size.
+  const initialWidth = window.innerWidth || 1280;
+  const cardScale = initialWidth >= 1024 ? 1 : Math.max(0.36, initialWidth / 1024);
+  const cardWidth = Math.round(75 * cardScale);
+  const cardHeight = Math.round(100 * cardScale);
+
+  // Per-viewport card corner radius (px). Smaller cards want a smaller corner so
+  // they don't read as pills. Edit these breakpoint values to taste.
+  const cardCornerRadius =
+    initialWidth >= 1024 ? CARD_CORNER_RADIUS : initialWidth >= 768 ? 7 : 5;
   // Flat plane. The "album/slab" look is not real geometry — it comes from the
   // frosted-glass shader (`uFrost`) plus card overlap + deck tilt once the cards
   // gather. On the idle ring + intro the card is a clean plane.
@@ -584,7 +598,7 @@ export function createRingScene({
         uFrost: { value: 0 },
         uFallbackColor: { value: [0.86, 0.89, 0.95] },
         uHalfSize: { value: [cardWidth * 0.5, cardHeight * 0.5] },
-        uCornerRadius: { value: CARD_CORNER_RADIUS },
+        uCornerRadius: { value: cardCornerRadius },
         uBorder: { value: 0 },
         uBorderWidth: { value: DEFAULT_RING_CONFIG.borderWidth },
         uBorderColor: { value: DEFAULT_RING_CONFIG.borderColor },
@@ -654,7 +668,7 @@ export function createRingScene({
         uFrost: { value: 0 },
         uFallbackColor: { value: [0.86, 0.89, 0.95] },
         uHalfSize: { value: [cardWidth * 0.5, cardHeight * 0.5] },
-        uCornerRadius: { value: CARD_CORNER_RADIUS },
+        uCornerRadius: { value: cardCornerRadius },
         uBorder: { value: 0 },
         uBorderWidth: { value: DEFAULT_RING_CONFIG.borderWidth },
         uBorderColor: { value: DEFAULT_RING_CONFIG.borderColor },
@@ -688,7 +702,7 @@ export function createRingScene({
   const glass = createGlassPass(gl, renderer);
 
   const progressState: RingSceneProgress = { zoom: 0, stack: 0, row: 0, iso: 0, intro: 0 };
-  const config: RingSceneConfig = { ...DEFAULT_RING_CONFIG };
+  const config: RingSceneConfig = { ...DEFAULT_RING_CONFIG, cornerRadius: cardCornerRadius };
   const pointer: RingPointerState = { x: 0, y: 0, inside: false };
   // Damped pointer — example-2 drives the ring torque + hover from `mouseDamp`
   // (an eased follow of the cursor), not the raw pointer, so motion settles in
@@ -716,10 +730,15 @@ export function createRingScene({
     const target = Math.max(minRadius, Math.min(heightCap, 460));
 
     if (width >= 1280) return target;
-    if (width >= 768) {
-      return Math.min(target, Math.max(width, height) * 0.5 - 120 * 1.3);
-    }
-    return Math.min(target, Math.max(width, height) * 0.5 - 120);
+    // Narrow / short viewports: the ring must fit BOTH the available width and
+    // height — portrait phones are width-bound, landscape phones height-bound.
+    // Keying off only the larger axis (old behaviour) let the side cards poke
+    // off-screen on portrait mobile. Keep a card half-extent + margin clear.
+    const widthFit = width * 0.5 - cardWidth * 0.5 - 16;
+    const heightFit = height * 0.5 - cardHeight * 0.5 - 16;
+    // 0.92 leaves a little extra breathing room around the ring on mobile.
+    const fit = Math.max(80, Math.min(widthFit, heightFit)) * 0.92;
+    return Math.min(target, fit);
   }
 
   function configureCamera(width: number, height: number) {
@@ -1190,6 +1209,13 @@ export function createRingScene({
     // Main (deckIndex 0) fades in first at centre (crossfades with ring-featured);
     // the rest fade in from `reappearStart`, stacked behind, as the slab tilts.
     const deckMainIn = easePow1InOut(clamp01(gatherT / 0.12));
+    // Flat-row fan width = (count-1) · step. The fixed desktop step runs the row
+    // off both edges on a phone, so cap the step to whatever keeps the fan (plus
+    // a card half + margin) inside the viewport width. No-op on wide screens.
+    const flatRowStep = Math.min(
+      FLAT_ROW_CARD_STEP,
+      (viewportWidth - cardWidth - 32) / Math.max(1, count - 1),
+    );
     deckCards.forEach((dc) => {
       const d = dc.deckIndex;
       // Stack: every card dead-centre behind main, stepped back in z (the book);
@@ -1198,7 +1224,7 @@ export function createRingScene({
       const flat = computeFlatRowTarget({
         index: d,
         count,
-        cardStep: FLAT_ROW_CARD_STEP,
+        cardStep: flatRowStep,
         depthStep: FLAT_ROW_DEPTH_STEP * stackGap,
       });
       const diag = computeRowTarget({

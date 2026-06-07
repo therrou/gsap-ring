@@ -233,7 +233,10 @@ body {
   display: block;
   width: 100%;
   height: 100%;
-  touch-action: none;
+  /* Let vertical swipes scroll the page (the canvas fills the viewport, so
+     `none` here would trap every touch and make the experience unscrollable on
+     mobile). Horizontal gestures still reach the scene for pointer/hover. */
+  touch-action: pan-y;
 }
 
 /* ── Lightbox (click a spread card → near-fullscreen image) ───────────────── */
