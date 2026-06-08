@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ScrollSmoother } from "gsap/ScrollSmoother";
@@ -134,6 +134,44 @@ const INTRO_EASES = [
   "none",
 ];
 
+// Eases offered for the lightbox open/close tweens in the tuner.
+const LIGHTBOX_EASES = [
+  "expo.out",
+  "power2.out",
+  "power3.out",
+  "power4.out",
+  "power2.inOut",
+  "power3.inOut",
+  "power4.inOut",
+  "sine.inOut",
+  "back.out(1.4)",
+  "none",
+];
+
+// Live-tunable lightbox (spread → click) open/close animation settings.
+type LightboxConfig = {
+  /** Open grow tween duration (s). */
+  openDuration: number;
+  /** Open grow ease. */
+  openEase: string;
+  /** Close shrink tween duration (s). */
+  closeDuration: number;
+  /** Close shrink ease. */
+  closeEase: string;
+  /** Apply the fullscreen backdrop blur (off = plain overlay → far cheaper). */
+  blurBackdrop: boolean;
+  /** Animate with GPU transforms (FLIP) instead of left/top/width/height. */
+  gpu: boolean;
+};
+const DEFAULT_LIGHTBOX: LightboxConfig = {
+  openDuration: 0.65,
+  openEase: "expo.out",
+  closeDuration: 0.5,
+  closeEase: "power3.inOut",
+  blurBackdrop: true,
+  gpu: true,
+};
+
 // Channels shown in the live "current step" readout (order = sequence order).
 const STATUS_CHANNELS: { key: "intro" | "zoom" | "stack" | "row" | "iso"; label: string }[] = [
   { key: "intro", label: "0 Intro" },
@@ -194,6 +232,8 @@ export function RingExperience({ showTuner = false }: RingExperienceProps) {
   // `rect` is the clicked card's on-screen box so the modal can grow from it.
   const smootherRef = useRef<ScrollSmoother | null>(null);
   const [lightbox, setLightbox] = useState<{ src: string; rect: LightboxRect } | null>(null);
+  // Live-tunable open/close animation params (exposed in the /test tuner).
+  const [lightboxCfg, setLightboxCfg] = useState<LightboxConfig>(DEFAULT_LIGHTBOX);
   function closeLightbox() {
     setLightbox(null);
     smootherRef.current?.paused(false);
@@ -606,6 +646,90 @@ export function RingExperience({ showTuner = false }: RingExperienceProps) {
                 />
               </label>
             ))}
+
+            <div className="ring-debug-section">Lightbox (spread → click)</div>
+
+            <label className="ring-debug-row ring-debug-check">
+              <span>GPU transform (FLIP)</span>
+              <input
+                type="checkbox"
+                checked={lightboxCfg.gpu}
+                onChange={(e) =>
+                  setLightboxCfg((prev) => ({ ...prev, gpu: e.target.checked }))
+                }
+              />
+            </label>
+
+            <label className="ring-debug-row ring-debug-check">
+              <span>Backdrop blur</span>
+              <input
+                type="checkbox"
+                checked={lightboxCfg.blurBackdrop}
+                onChange={(e) =>
+                  setLightboxCfg((prev) => ({ ...prev, blurBackdrop: e.target.checked }))
+                }
+              />
+            </label>
+
+            <label className="ring-debug-row">
+              <span>Close duration {lightboxCfg.closeDuration.toFixed(2)}s</span>
+              <input
+                type="range"
+                min={0.1}
+                max={1.5}
+                step={0.05}
+                value={lightboxCfg.closeDuration}
+                onChange={(e) =>
+                  setLightboxCfg((prev) => ({ ...prev, closeDuration: Number(e.target.value) }))
+                }
+              />
+            </label>
+
+            <label className="ring-debug-row">
+              <span>Close ease</span>
+              <select
+                value={lightboxCfg.closeEase}
+                onChange={(e) =>
+                  setLightboxCfg((prev) => ({ ...prev, closeEase: e.target.value }))
+                }
+              >
+                {LIGHTBOX_EASES.map((ease) => (
+                  <option key={ease} value={ease}>
+                    {ease}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="ring-debug-row">
+              <span>Open duration {lightboxCfg.openDuration.toFixed(2)}s</span>
+              <input
+                type="range"
+                min={0.1}
+                max={1.5}
+                step={0.05}
+                value={lightboxCfg.openDuration}
+                onChange={(e) =>
+                  setLightboxCfg((prev) => ({ ...prev, openDuration: Number(e.target.value) }))
+                }
+              />
+            </label>
+
+            <label className="ring-debug-row">
+              <span>Open ease</span>
+              <select
+                value={lightboxCfg.openEase}
+                onChange={(e) =>
+                  setLightboxCfg((prev) => ({ ...prev, openEase: e.target.value }))
+                }
+              >
+                {LIGHTBOX_EASES.map((ease) => (
+                  <option key={ease} value={ease}>
+                    {ease}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         ) : (
           <button type="button" className="ring-debug-toggle" onClick={() => setShowDebug(true)}>
@@ -616,7 +740,12 @@ export function RingExperience({ showTuner = false }: RingExperienceProps) {
       {showTuner && <div className="ring-card-labels" ref={labelsRef} aria-hidden="true" />}
 
       {lightbox && (
-        <Lightbox src={lightbox.src} rect={lightbox.rect} onClose={closeLightbox} />
+        <Lightbox
+          src={lightbox.src}
+          rect={lightbox.rect}
+          onClose={closeLightbox}
+          cfg={lightboxCfg}
+        />
       )}
 
       <div id="smooth-wrapper" ref={smoothWrapperRef}>
@@ -640,15 +769,26 @@ type LightboxRect = { left: number; top: number; width: number; height: number }
  * on-screen box) to a centred, aspect-preserved frame with a soft blurred
  * backdrop — matching the project's clean, rounded, light aesthetic. Close via
  * backdrop click, the × button, or Escape (animates back into the card).
+ *
+ * Two animation paths (toggled live from the /test tuner via `cfg.gpu`):
+ *   • FLIP (default) — the frame is laid out at its FINAL box and mapped onto the
+ *     card with a `translate + scale` transform, then the transform is animated to
+ *     identity (open) / back to the mapping (close). Compositor-only: no layout
+ *     reflow and no per-frame re-sampling of the decoded image, so the close
+ *     (where the full-res image is already painted) stays smooth.
+ *   • Legacy — animates `left/top/width/height`. Kept for side-by-side comparison;
+ *     this is the path that stutters on close once the image has decoded.
  */
 function Lightbox({
   src,
   rect,
   onClose,
+  cfg,
 }: {
   src: string;
   rect: LightboxRect;
   onClose: () => void;
+  cfg: LightboxConfig;
 }) {
   const backdropRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -669,35 +809,73 @@ function Lightbox({
     return { left: (vw - width) / 2, top: (vh - height) / 2, width, height };
   }
 
-  // Grow-in from the clicked card's box.
-  useEffect(() => {
+  // Transform that, applied to a frame laid out at `t` (transform-origin centre),
+  // makes it visually cover the card box `r`. Scaling about the centre leaves the
+  // centre fixed, so the translate just carries `t`'s centre onto `r`'s centre.
+  function mapToCard(t: LightboxRect, r: LightboxRect) {
+    return {
+      sx: r.width / t.width,
+      sy: r.height / t.height,
+      dx: r.left + r.width / 2 - (t.left + t.width / 2),
+      dy: r.top + r.height / 2 - (t.top + t.height / 2),
+    };
+  }
+
+  // Grow-in from the clicked card's box. useLayoutEffect so the initial
+  // `gsap.set` lands before the browser paints (no first-frame flash).
+  useLayoutEffect(() => {
     const frame = frameRef.current;
     const backdrop = backdropRef.current;
     if (!frame || !backdrop) return;
     const t = targetRect();
     gsap.set(backdrop, { opacity: 0 });
-    gsap.set(frame, {
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-      height: rect.height,
-      borderRadius: 9,
-    });
     const tl = gsap.timeline();
     tl.to(backdrop, { opacity: 1, duration: 0.45, ease: "power2.out" }, 0);
-    tl.to(
-      frame,
-      {
+    if (cfg.gpu) {
+      const m = mapToCard(t, rect);
+      gsap.set(frame, {
         left: t.left,
         top: t.top,
         width: t.width,
         height: t.height,
         borderRadius: 16,
-        duration: 0.65,
-        ease: "expo.out",
-      },
-      0,
-    );
+        transformOrigin: "center center",
+        x: m.dx,
+        y: m.dy,
+        scaleX: m.sx,
+        scaleY: m.sy,
+      });
+      tl.to(
+        frame,
+        { x: 0, y: 0, scaleX: 1, scaleY: 1, duration: cfg.openDuration, ease: cfg.openEase },
+        0,
+      );
+    } else {
+      gsap.set(frame, {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        borderRadius: 9,
+        x: 0,
+        y: 0,
+        scaleX: 1,
+        scaleY: 1,
+      });
+      tl.to(
+        frame,
+        {
+          left: t.left,
+          top: t.top,
+          width: t.width,
+          height: t.height,
+          borderRadius: 16,
+          duration: cfg.openDuration,
+          ease: cfg.openEase,
+        },
+        0,
+      );
+    }
     return () => {
       tl.kill();
     };
@@ -715,20 +893,37 @@ function Lightbox({
       return;
     }
     const tl = gsap.timeline({ onComplete: onClose });
-    tl.to(
-      frame,
-      {
-        left: rect.left,
-        top: rect.top,
-        width: rect.width,
-        height: rect.height,
-        borderRadius: 9,
-        duration: 0.5,
-        ease: "power3.inOut",
-      },
-      0,
-    );
-    tl.to(backdrop, { opacity: 0, duration: 0.5, ease: "power2.in" }, 0.05);
+    if (cfg.gpu) {
+      const m = mapToCard(targetRect(), rect);
+      tl.to(
+        frame,
+        {
+          x: m.dx,
+          y: m.dy,
+          scaleX: m.sx,
+          scaleY: m.sy,
+          borderRadius: 9,
+          duration: cfg.closeDuration,
+          ease: cfg.closeEase,
+        },
+        0,
+      );
+    } else {
+      tl.to(
+        frame,
+        {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          borderRadius: 9,
+          duration: cfg.closeDuration,
+          ease: cfg.closeEase,
+        },
+        0,
+      );
+    }
+    tl.to(backdrop, { opacity: 0, duration: cfg.closeDuration, ease: "power2.in" }, 0.05);
   }
 
   // Latest `close` for the key listener + lock page scroll while open.
@@ -749,7 +944,16 @@ function Lightbox({
 
   return (
     <div className="ring-lightbox" onClick={close}>
-      <div className="ring-lightbox-backdrop" ref={backdropRef} style={{ opacity: 0 }} />
+      <div
+        className="ring-lightbox-backdrop"
+        ref={backdropRef}
+        style={{
+          opacity: 0,
+          ...(cfg.blurBackdrop
+            ? null
+            : { backdropFilter: "none", WebkitBackdropFilter: "none" }),
+        }}
+      />
       <div
         className="ring-lightbox-frame"
         ref={frameRef}

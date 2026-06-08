@@ -309,7 +309,11 @@ body {
   box-shadow:
     0 2px 8px rgba(20, 24, 34, 0.08),
     0 40px 120px rgba(20, 24, 34, 0.28);
-  will-change: left, top, width, height, border-radius;
+  /* FLIP path animates transform (compositor-only); the legacy path animates
+     left/top/width/height (those can't be promoted — kept only for comparison). */
+  will-change: transform, opacity;
+  transform-origin: center center;
+  backface-visibility: hidden;
   z-index: 1;
 }
 
